@@ -1,96 +1,83 @@
 package main
 
 import (
-	"flag"
-	"fmt"
-	"log"
-	"net/http"
-	"os"
-	"strings"
+    "flag"
+    "fmt"
+    "log"
+    "net/http"
+    "os"
+    "strings"
 
-	"github.com/dgrijalva/jwt-go/v4"
+    "github.com/golang-jwt/jwt/v5"
 )
 
-// Struct for JWT claims
-type Claims struct {
-	Username string `json:"username"`
-	jwt.StandardClaims
-}
+// JWT middleware to check the token
+func jwtMiddleware(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        // Get the JWT secret from the environment variable
+        secret := os.Getenv("JWT_SECRET")
+        if secret == "" {
+            log.Fatal("JWT_SECRET environment variable is not set")
+        }
 
-// Middleware function to authenticate JWT
-func authenticate(next http.Handler, jwtSecret []byte) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Get the token from the Authorization header
-		authHeader := r.Header.Get("Authorization")
-		if authHeader == "" {
-			http.Error(w, "Authorization header is required", http.StatusUnauthorized)
-			return
-		}
+        // Get the token from the Authorization header
+        authHeader := r.Header.Get("Authorization")
+        if authHeader == "" {
+            http.Error(w, "Authorization header missing", http.StatusUnauthorized)
+            return
+        }
 
-		// Extract the JWT token from the Authorization header
-		authParts := strings.Split(authHeader, " ")
-		if len(authParts) != 2 || authParts[0] != "Bearer" {
-			http.Error(w, "Invalid authorization format", http.StatusUnauthorized)
-			return
-		}
+        parts := strings.Split(authHeader, " ")
+        if len(parts) != 2 || parts[0] != "Bearer" {
+            http.Error(w, "Invalid Authorization header", http.StatusUnauthorized)
+            return
+        }
 
-		tokenString := authParts[1]
+        tokenString := parts[1]
 
-		// Parse the token
-		token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
-			return jwtSecret, nil
-		})
+        // Parse the token
+        token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+            // Ensure the token method is correct
+            if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+                return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+            }
+            return []byte(secret), nil
+        })
 
-		if err != nil {
-			http.Error(w, "Invalid token", http.StatusUnauthorized)
-			return
-		}
+        if err != nil || !token.Valid {
+            http.Error(w, "Invalid token", http.StatusUnauthorized)
+            return
+        }
 
-		// Verify the token is valid
-		if !token.Valid {
-			http.Error(w, "Token is not valid", http.StatusUnauthorized)
-			return
-		}
-
-		// If the token is valid, continue to the next handler
-		next.ServeHTTP(w, r)
-	})
+        // If token is valid, proceed to the next handler
+        next.ServeHTTP(w, r)
+    })
 }
 
 func main() {
-	// Define flags for static directory path, JWT secret environment variable, and server port
-	var staticDir string
-	var jwtSecret string
-	var port string
+    // Define flags for directory and port
+    staticDir := flag.String("path", "./static", "Path to the static files directory")
+    port := flag.String("port", "8080", "Port to serve on")
 
-	flag.StringVar(&staticDir, "static-dir", "./static", "Path to the static directory")
-	flag.StringVar(&jwtSecret, "jwt-secret", "", "JWT secret key (environment variable)")
-	flag.StringVar(&port, "port", "8080", "Port for the server to listen on")
+    // Parse the flags
+    flag.Parse()
 
-	flag.Parse()
+    // Check if the JWT_SECRET environment variable is set
+    secret := os.Getenv("JWT_SECRET")
+    if secret == "" {
+        log.Fatal("JWT_SECRET environment variable is not set")
+    }
 
-	// Validate the static directory path
-	if _, err := os.Stat(staticDir); os.IsNotExist(err) {
-		log.Fatalf("Static directory '%s' does not exist", staticDir)
-	}
+    // Set up the file server
+    fs := http.FileServer(http.Dir(*staticDir))
 
-	// Validate JWT secret
-	if jwtSecret == "" {
-		log.Fatal("JWT secret is not provided")
-	}
+    // Create a handler with JWT middleware
+    http.Handle("/", jwtMiddleware(fs))
 
-	// Convert JWT secret to []byte
-	jwtSecretBytes := []byte(jwtSecret)
-
-	// Create a file server for the static directory
-	fs := http.FileServer(http.Dir(staticDir))
-
-	// Handle requests to serve static files with authentication middleware
-	http.Handle("/", authenticate(fs, jwtSecretBytes))
-
-	// Start the server
-	addr := ":" + port
-	fmt.Printf("Server listening on %s\n", addr)
-	log.Fatal(http.ListenAndServe(addr, nil))
+    log.Printf("Serving %s on HTTP port: %s\n", *staticDir, *port)
+    err := http.ListenAndServe(":"+*port, nil)
+    if err != nil {
+        log.Fatal(err)
+    }
 }
 
