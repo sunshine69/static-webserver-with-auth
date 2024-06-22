@@ -6,7 +6,7 @@ Testing ...
 Build
 
 ```
-go build .
+env CGO_ENABLED=0 go build -trimpath -ldflags="-X main.version=v0.1 -extldflags=-static -w -s" .
 ```
 
 Run
