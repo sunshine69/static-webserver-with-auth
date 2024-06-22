@@ -1,87 +1,141 @@
 package main
 
 import (
-    "flag"
-    "fmt"
-    "log"
-    "net/http"
-    "os"
-    "strings"
+	"fmt"
+	"html/template"
+	"log"
+	"net/http"
+	"os"
+	"flag"
+	"time"
 
-    "github.com/golang-jwt/jwt/v5"
+	"github.com/golang-jwt/jwt/v5"
 )
 
-// JWT middleware to check the token
-func jwtMiddleware(next http.Handler) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        // Get the JWT secret from the environment variable
-        secret := os.Getenv("JWT_SECRET")
-        if secret == "" {
-            log.Fatal("JWT_SECRET environment variable is not set")
-        }
+// JWT Claims structure
+type Claims struct {
+	Username string `json:"username"`
+	jwt.RegisteredClaims
+}
 
-	if secret == "BYPASS" {
-	    next.ServeHTTP(w, r)
+// Login page HTML template
+var loginTemplate = template.Must(template.New("login").Parse(`
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Login</title>
+</head>
+<body>
+    <h2>Login with JWT</h2>
+    <form method="POST" action="/login">
+        <label for="token">JWT Token:</label>
+        <input type="text" id="token" name="token" required>
+        <button type="submit">Login</button>
+    </form>
+</body>
+</html>
+`))
+
+// Handler for the login page
+func loginPageHandler(w http.ResponseWriter, r *http.Request, jwtSecret []byte) {
+	if r.Method == http.MethodGet {
+		loginTemplate.Execute(w, nil)
+	} else if r.Method == http.MethodPost {
+		token := r.FormValue("token")
+		claims := &Claims{}
+
+		// Parse and validate the JWT token
+		parsedToken, err := jwt.ParseWithClaims(token, claims, func(token *jwt.Token) (interface{}, error) {
+			return jwtSecret, nil
+		}, jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Name}))
+
+		if err != nil || !parsedToken.Valid {
+			http.Error(w, "Invalid token", http.StatusUnauthorized)
+			return
+		}
+
+		// Token is valid, set a session cookie
+		http.SetCookie(w, &http.Cookie{
+			Name:     "session_token",
+			Value:    token, // Use the token as session token for simplicity
+			Expires:  time.Now().Add(1 * time.Hour),
+			HttpOnly: true,
+			Secure:   false, // Change to true if using HTTPS
+			Path:     "/",
+		})
+
+		// Redirect to the home page or protected resource
+		http.Redirect(w, r, "/", http.StatusFound)
 	}
+}
 
-        // Get the token from the Authorization header
-        authHeader := r.Header.Get("Authorization")
-        if authHeader == "" {
-            http.Error(w, "Authorization header missing", http.StatusUnauthorized)
-            return
-        }
+// Middleware to check JWT in cookies
+func authenticate(next http.Handler, jwtSecret []byte) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cookie, err := r.Cookie("session_token")
+		if err != nil {
+			// Redirect to login if no session cookie
+			http.Redirect(w, r, "/login", http.StatusFound)
+			return
+		}
 
-        parts := strings.Split(authHeader, " ")
-        if len(parts) != 2 || parts[0] != "Bearer" {
-            http.Error(w, "Invalid Authorization header", http.StatusUnauthorized)
-            return
-        }
+		token := cookie.Value
+		claims := &Claims{}
+		parsedToken, err := jwt.ParseWithClaims(token, claims, func(token *jwt.Token) (interface{}, error) {
+			return jwtSecret, nil
+		}, jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Name}))
 
-        tokenString := parts[1]
+		if err != nil || !parsedToken.Valid {
+			// Redirect to login if token is invalid
+			http.Redirect(w, r, "/login", http.StatusFound)
+			return
+		}
 
-        // Parse the token
-        token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-            // Ensure the token method is correct
-            if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-                return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-            }
-            return []byte(secret), nil
-        })
-
-        if err != nil || !token.Valid {
-            http.Error(w, "Invalid token", http.StatusUnauthorized)
-            return
-        }
-
-        // If token is valid, proceed to the next handler
-        next.ServeHTTP(w, r)
-    })
+		// Token is valid, continue to the requested resource
+		next.ServeHTTP(w, r)
+	})
 }
 
 func main() {
-    // Define flags for directory and port
-    staticDir := flag.String("path", "./static", "Path to the static files directory")
-    port := flag.String("port", "8080", "Port to serve on")
+	// Command-line arguments
+	staticDir := flag.String("static-dir", "./static", "Directory to serve static files from")
+	port := flag.String("port", "8080", "Port to listen on")
+	flag.Parse()
 
-    // Parse the flags
-    flag.Parse()
+	// Environment variable for JWT secret
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		log.Fatal("JWT_SECRET environment variable is required")
+	}
 
-    // Check if the JWT_SECRET environment variable is set
-    secret := os.Getenv("JWT_SECRET")
-    if secret == "" {
-        log.Fatal("JWT_SECRET environment variable is not set")
-    }
+	// Static file server
+	staticFileServer := http.FileServer(http.Dir(*staticDir))
 
-    // Set up the file server
-    fs := http.FileServer(http.Dir(*staticDir))
+	// Routes
+	http.Handle("/static/", http.StripPrefix("/static", authenticate(staticFileServer, []byte(jwtSecret))))
+	http.Handle("/login", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		loginPageHandler(w, r, []byte(jwtSecret))
+	}))
+	http.Handle("/", authenticate(http.HandlerFunc(homeHandler), []byte(jwtSecret)))
 
-    // Create a handler with JWT middleware
-    http.Handle("/", jwtMiddleware(fs))
+	fmt.Printf("Server is running on port %s\n", *port)
+	log.Fatal(http.ListenAndServe(":" + *port, nil))
+}
 
-    log.Printf("Serving %s on HTTP port: %s\n", *staticDir, *port)
-    err := http.ListenAndServe(":"+*port, nil)
-    if err != nil {
-        log.Fatal(err)
-    }
+// Handler for the home page (or other protected resources)
+func homeHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html")
+	w.Write([]byte(`
+	<!DOCTYPE html>
+	<html>
+	<head>
+		<title>Home</title>
+	</head>
+	<body>
+		<h1>Welcome to the protected resource</h1>
+		<a href="/static/file.txt">Access static file</a>
+	</body>
+	</html>
+	`))
 }
 
