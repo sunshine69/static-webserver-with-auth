@@ -1,12 +1,13 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"html/template"
 	"log"
 	"net/http"
 	"os"
-	"flag"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -36,6 +37,13 @@ var loginTemplate = template.Must(template.New("login").Parse(`
 </html>
 `))
 
+var cookieName string = "session_token"
+
+// Path to the web root dir. This will be relative path to the current root; like ./static. The route path will be absolute like /static
+// and then be stripped off. This can be an absolute path though started with / but the route will be the same exactly absolute path
+// No slash / at the end
+var webRoot string = "./static"
+
 // Handler for the login page
 func loginPageHandler(w http.ResponseWriter, r *http.Request, jwtSecret []byte) {
 	if r.Method == http.MethodGet {
@@ -56,7 +64,7 @@ func loginPageHandler(w http.ResponseWriter, r *http.Request, jwtSecret []byte) 
 
 		// Token is valid, set a session cookie
 		http.SetCookie(w, &http.Cookie{
-			Name:     "session_token",
+			Name:     cookieName,
 			Value:    token, // Use the token as session token for simplicity
 			Expires:  time.Now().Add(1 * time.Hour),
 			HttpOnly: true,
@@ -72,7 +80,7 @@ func loginPageHandler(w http.ResponseWriter, r *http.Request, jwtSecret []byte) 
 // Middleware to check JWT in cookies
 func authenticate(next http.Handler, jwtSecret []byte) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cookie, err := r.Cookie("session_token")
+		cookie, err := r.Cookie(cookieName)
 		if err != nil {
 			// Redirect to login if no session cookie
 			http.Redirect(w, r, "/login", http.StatusFound)
@@ -98,8 +106,21 @@ func authenticate(next http.Handler, jwtSecret []byte) http.Handler {
 
 func main() {
 	// Command-line arguments
-	staticDir := flag.String("static-dir", "./static", "Directory to serve static files from")
+	staticDir := flag.String("web-root", "./static", "Directory to serve static files from")
 	port := flag.String("port", "8080", "Port to listen on")
+
+	flag.Usage = func() {
+		flag.PrintDefaults()
+		fmt.Println(`           
+							***** static web server with jwt auth *****
+		This web server serves static files and protected with jwt auth. Apart from command flags the enn vars below will override it
+		- JWT_SECRET - The secret to validate the jwt token
+		- SESSION_COOKIE_NAME - the session cookie name used to get the jwt token. Default is statis_web_srv_session
+		- WEB_ROOT - The directory path to serve files from. Can be relative path to the current dir, or absolute path. 
+		  The html path will be the same without dot if it is relative. Override cmd flag 'web-root'
+		- PORT - http port to listen. Default 8080. 		
+		`)
+	}
 	flag.Parse()
 
 	// Environment variable for JWT secret
@@ -108,18 +129,42 @@ func main() {
 		log.Fatal("JWT_SECRET environment variable is required")
 	}
 
+	cookieName = os.Getenv("SESSION_COOKIE_NAME")
+	if cookieName == "" {
+		cookieName = "statis_web_srv_session"
+	}
+
+	listenPort := os.Getenv("PORT")
+	if listenPort == "" {
+		listenPort = *port
+	}
+
 	// Static file server
-	staticFileServer := http.FileServer(http.Dir(*staticDir))
+	webRoot = os.Getenv("WEB_ROOT")
+	if webRoot == "" {
+		webRoot = *staticDir
+	}
+
+	staticFileServer := http.FileServer(http.Dir(webRoot))
+
+	var staticRoutePath, stripPrefix string
+	if strings.HasPrefix(webRoot, ".") {
+		stripPrefix = strings.TrimPrefix(webRoot, ".")
+		staticRoutePath = stripPrefix + "/"
+	} else {
+		staticRoutePath = webRoot + "/"
+		stripPrefix = webRoot
+	}
 
 	// Routes
-	http.Handle("/static/", http.StripPrefix("/static", authenticate(staticFileServer, []byte(jwtSecret))))
+	http.Handle(staticRoutePath, http.StripPrefix(stripPrefix, authenticate(staticFileServer, []byte(jwtSecret))))
 	http.Handle("/login", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		loginPageHandler(w, r, []byte(jwtSecret))
 	}))
 	http.Handle("/", authenticate(http.HandlerFunc(homeHandler), []byte(jwtSecret)))
 
-	fmt.Printf("Server is running on port %s\n", *port)
-	log.Fatal(http.ListenAndServe(":" + *port, nil))
+	fmt.Printf("Server is running on port %s\n", listenPort)
+	log.Fatal(http.ListenAndServe(":"+listenPort, nil))
 }
 
 // Handler for the home page (or other protected resources)
@@ -138,4 +183,3 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 	</html>
 	`))
 }
-
