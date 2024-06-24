@@ -37,12 +37,12 @@ var loginTemplate = template.Must(template.New("login").Parse(`
 </html>
 `))
 
-var cookieName string = "session_token"
+var cookieName, authType, queryParamKey string
 
 // Path to the web root dir. This will be relative path to the current root; like ./static. The route path will be absolute like /static
 // and then be stripped off. This can be an absolute path though started with / but the route will be the same exactly absolute path
 // No slash / at the end
-var webRoot string = "./static"
+var webRoot string
 
 // Handler for the login page
 func loginPageHandler(w http.ResponseWriter, r *http.Request, jwtSecret []byte) {
@@ -80,14 +80,20 @@ func loginPageHandler(w http.ResponseWriter, r *http.Request, jwtSecret []byte) 
 // Middleware to check JWT in cookies
 func authenticate(next http.Handler, jwtSecret []byte) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cookie, err := r.Cookie(cookieName)
-		if err != nil {
-			// Redirect to login if no session cookie
-			http.Redirect(w, r, "/login", http.StatusFound)
-			return
+		var token string
+		switch authType {
+		case "jwt-cookie":
+			cookie, err := r.Cookie(cookieName)
+			if err != nil {
+				// Redirect to login if no session cookie
+				http.Redirect(w, r, "/login", http.StatusFound)
+				return
+			}
+			token = cookie.Value
+		case "jwt-query-param":
+			token = r.URL.Query().Get(queryParamKey)
 		}
 
-		token := cookie.Value
 		claims := &Claims{}
 		parsedToken, err := jwt.ParseWithClaims(token, claims, func(token *jwt.Token) (interface{}, error) {
 			return jwtSecret, nil
@@ -116,9 +122,13 @@ func main() {
 		This web server serves static files and protected with jwt auth. Apart from command flags the enn vars below will override it
 		- JWT_SECRET - The secret to validate the jwt token
 		- SESSION_COOKIE_NAME - the session cookie name used to get the jwt token. Default is statis_web_srv_session
-		- WEB_ROOT - The directory path to serve files from. Can be relative path to the current dir, or absolute path. 
+		- WEB_ROOT - The directory path to serve files from. Can be relative path to the current dir, or absolute path.
 		  The html path will be the same without dot if it is relative. Override cmd flag 'web-root'
-		- PORT - http port to listen. Default 8080. 		
+		- PORT - http port to listen. Default 8080.
+		- AUTH_TYPE - default is jwt-cookie. Can be:
+		  - 'jwt-cookie' - store and get the jwt token from session cookie
+		  - 'jwt-query-param' - Get the jwt from query parameter. In this case need to provide a env var. Also there is no login helper for this case.
+		    - QUERY_PARAM_KEY - The parameter key. Default is 'access_token'; that is the url is like https://<domain>/path?access_token=<jwt-token-string>
 		`)
 	}
 	flag.Parse()
@@ -137,6 +147,16 @@ func main() {
 	listenPort := os.Getenv("PORT")
 	if listenPort == "" {
 		listenPort = *port
+	}
+
+	authType = os.Getenv("AUTH_TYPE") // jwt-cookie, jwt-query-param
+	if authType == "" {
+		authType = "jwt-cookie"
+	}
+
+	queryParamKey = os.Getenv("QUERY_PARAM_KEY")
+	if queryParamKey == "" {
+		queryParamKey = "access_token"
 	}
 
 	// Static file server
