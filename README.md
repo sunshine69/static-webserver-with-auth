@@ -15,6 +15,13 @@ Run
 env JWT_SECRET=myhighlysecret ./static-webserver-with-jwt
 ```
 
+docker image per release is available. Try (add more option -e as appropriate, and the tag is the release version)
+```
+docker run --rm -p 8080:8080 -v $PWD:/www -e WEB_ROOT=/www -e JWT_SECRET=123 stevekieu/static-webserver-with-jwt:v0.6
+```
+
+The url will be http://localhost:8080/www/
+
 Generate a valid jwt token go to https://jwt.io/ and geenrate one, use the secrets is the one you set when run the program.
 
 Use it in curl command like this
