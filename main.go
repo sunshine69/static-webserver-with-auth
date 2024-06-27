@@ -92,6 +92,18 @@ func authenticate(next http.Handler, jwtSecret []byte) http.Handler {
 			token = cookie.Value
 		case "jwt-query-param":
 			token = r.URL.Query().Get(queryParamKey)
+		case "auto":
+			cookie, err := r.Cookie(cookieName)
+			if err != nil {
+				token = r.URL.Query().Get(queryParamKey)
+			} else {
+				token = cookie.Value
+			}
+			if token == "" {
+				// Redirect to login if all hopes lost
+				http.Redirect(w, r, "/login", http.StatusFound)
+				return
+			}
 		case "bypass":
 			next.ServeHTTP(w, r)
 		}
@@ -107,6 +119,15 @@ func authenticate(next http.Handler, jwtSecret []byte) http.Handler {
 			return
 		}
 
+		// Token is valid, set a session cookie
+		http.SetCookie(w, &http.Cookie{
+			Name:     cookieName,
+			Value:    token, // Use the token as session token for simplicity
+			Expires:  time.Now().Add(1 * time.Hour),
+			HttpOnly: true,
+			Secure:   false, // Change to true if using HTTPS
+			Path:     "/",
+		})
 		// Token is valid, continue to the requested resource
 		next.ServeHTTP(w, r)
 	})
@@ -131,6 +152,8 @@ func main() {
 		  - 'jwt-cookie' - store and get the jwt token from session cookie
 		  - 'jwt-query-param' - Get the jwt from query parameter. In this case need to provide a env var. Also there is no login helper for this case.
 		    - QUERY_PARAM_KEY - The parameter key. Default is 'access_token'; that is the url is like https://<domain>/path?access_token=<jwt-token-string>
+		  - 'auto' - This will try to get token from session cookie and if not then read from the query param. When it is validated a new session cookie 
+		    will be set.
 		`)
 	}
 	flag.Parse()
