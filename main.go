@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,6 +39,8 @@ var loginTemplate = template.Must(template.New("login").Parse(`
 `))
 
 var cookieName, authType, queryParamKey string
+var secureCookie bool
+var sessionLifeTime int
 
 // Path to the web root dir. This will be relative path to the current root; like ./static. The route path will be absolute like /static
 // and then be stripped off. This can be an absolute path though started with / but the route will be the same exactly absolute path
@@ -66,9 +69,9 @@ func loginPageHandler(w http.ResponseWriter, r *http.Request, jwtSecret []byte) 
 		http.SetCookie(w, &http.Cookie{
 			Name:     cookieName,
 			Value:    token, // Use the token as session token for simplicity
-			Expires:  time.Now().Add(1 * time.Hour),
+			Expires:  time.Now().Add(time.Duration(sessionLifeTime) * time.Hour),
 			HttpOnly: true,
-			Secure:   false, // Change to true if using HTTPS
+			Secure:   secureCookie,
 			Path:     "/",
 		})
 
@@ -123,9 +126,9 @@ func authenticate(next http.Handler, jwtSecret []byte) http.Handler {
 		http.SetCookie(w, &http.Cookie{
 			Name:     cookieName,
 			Value:    token, // Use the token as session token for simplicity
-			Expires:  time.Now().Add(1 * time.Hour),
+			Expires:  time.Now().Add(time.Duration(sessionLifeTime) * time.Hour),
 			HttpOnly: true,
-			Secure:   false, // Change to true if using HTTPS
+			Secure:   secureCookie,
 			Path:     "/",
 		})
 		// Token is valid, continue to the requested resource
@@ -154,6 +157,8 @@ func main() {
 		    - QUERY_PARAM_KEY - The parameter key. Default is 'access_token'; that is the url is like https://<domain>/path?access_token=<jwt-token-string>
 		  - 'auto' - This will try to get token from session cookie and if not then read from the query param. When it is validated a new session cookie 
 		    will be set.
+		- SESSION_LIFE_TIME - the lifetime of the session cookie. Default is 1 (that is 1 hour)
+		- SECURE_COOKIE - set the secure property of the session cookie. Default is true. Set to false if you are testing and not using https
 		`)
 	}
 	flag.Parse()
@@ -167,6 +172,16 @@ func main() {
 	cookieName = os.Getenv("SESSION_COOKIE_NAME")
 	if cookieName == "" {
 		cookieName = "statis_web_srv_session"
+	}
+
+	secureCookieStr := os.Getenv("SECURE_COOKIE")
+	var err error
+	if secureCookieStr == "" {
+		secureCookie = true
+	} else {
+		if secureCookie, err = strconv.ParseBool(secureCookieStr); err != nil {
+			secureCookie = true
+		}
 	}
 
 	listenPort := os.Getenv("PORT")
@@ -188,6 +203,15 @@ func main() {
 	webRoot = os.Getenv("WEB_ROOT")
 	if webRoot == "" {
 		webRoot = *staticDir
+	}
+
+	sessionLifeTimeStr := os.Getenv("SESSION_LIFE_TIME")
+	if sessionLifeTimeStr == "" {
+		sessionLifeTime = 1
+	} else {
+		if sessionLifeTime, err = strconv.Atoi(sessionLifeTimeStr); err != nil {
+			sessionLifeTime = 1
+		}
 	}
 
 	staticFileServer := http.FileServer(http.Dir(webRoot))
