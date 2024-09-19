@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -19,6 +20,18 @@ type Claims struct {
 	Username string `json:"username"`
 	jwt.RegisteredClaims
 }
+
+var cookieName, authType, queryParamKey string
+var secureCookie bool
+var sessionLifeTime int
+
+// Path to the web root dir. This will be relative path to the current root; like ./static. The route path will be absolute like /static
+// and then be stripped off. This can be an absolute path though started with / but the route will be the same exactly absolute path
+// No slash / at the end
+var (
+	webRoot    string
+	publicRoot string
+)
 
 // Login page HTML template
 var loginTemplate = template.Must(template.New("login").Parse(`
@@ -38,77 +51,68 @@ var loginTemplate = template.Must(template.New("login").Parse(`
 </html>
 `))
 
-var cookieName, authType, queryParamKey string
-var secureCookie bool
-var sessionLifeTime int
-
-// Path to the web root dir. This will be relative path to the current root; like ./static. The route path will be absolute like /static
-// and then be stripped off. This can be an absolute path though started with / but the route will be the same exactly absolute path
-// No slash / at the end
-var webRoot string
-
 // Handler for the login page
-func loginPageHandler(w http.ResponseWriter, r *http.Request, jwtSecret []byte) {
-	if r.Method == http.MethodGet {
-		loginTemplate.Execute(w, nil)
-	} else if r.Method == http.MethodPost {
-		token := r.FormValue("token")
+func loginPageHandler(c *gin.Context) {
+	switch c.Request.Method {
+	case http.MethodGet:
+		fmt.Fprintf(os.Stderr, "[LOGIN GET] \n")
+		loginTemplate.Execute(c.Writer, gin.H{})
+	case http.MethodPost:
+		fmt.Fprintf(os.Stderr, "[LOGIN POST] \n")
+		token, _ := c.GetPostForm("token")
 		claims := &Claims{}
-
 		// Parse and validate the JWT token
 		parsedToken, err := jwt.ParseWithClaims(token, claims, func(token *jwt.Token) (interface{}, error) {
 			return jwtSecret, nil
 		}, jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Name}))
 
 		if err != nil || !parsedToken.Valid {
-			http.Error(w, "Invalid token", http.StatusUnauthorized)
+			fmt.Fprintf(os.Stderr, "[ERROR] %s\n", err.Error())
+			c.AbortWithStatus(http.StatusUnauthorized)
 			return
 		}
-
 		// Token is valid, set a session cookie
-		http.SetCookie(w, &http.Cookie{
-			Name:     cookieName,
-			Value:    token, // Use the token as session token for simplicity
-			Expires:  time.Now().Add(time.Duration(sessionLifeTime) * time.Hour),
-			HttpOnly: true,
-			Secure:   secureCookie,
-			Path:     "/",
-		})
+		fmt.Fprintf(os.Stderr, "[SET COOKIE] \n")
+		c.SetCookie(cookieName, token, (time.Now().Add(time.Duration(sessionLifeTime) * time.Hour)).Second(), "/", "192.168.20.18", secureCookie, true)
 
 		// Redirect to the home page or protected resource
-		http.Redirect(w, r, "/", http.StatusFound)
+		fmt.Fprintf(os.Stderr, "[REDIRECT] \n")
+		c.Redirect(http.StatusFound, strings.TrimPrefix(webRoot, "."))
+		return
 	}
 }
 
 // Middleware to check JWT in cookies
-func authenticate(next http.Handler, jwtSecret []byte) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func AuthenticateMidleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
 		var token string
+		var err error
+		redirect := func(c *gin.Context) {
+			// Redirect to login if all hopes lost
+			c.Redirect(http.StatusFound, "/login")
+			c.Abort()
+		}
 		switch authType {
 		case "jwt-cookie":
-			cookie, err := r.Cookie(cookieName)
+			token, err = c.Cookie(cookieName)
 			if err != nil {
-				// Redirect to login if no session cookie
-				http.Redirect(w, r, "/login", http.StatusFound)
-				return
+				redirect(c)
 			}
-			token = cookie.Value
 		case "jwt-query-param":
-			token = r.URL.Query().Get(queryParamKey)
+			token, _ = c.GetQuery(queryParamKey)
+			if token == "" {
+				redirect(c)
+			}
 		case "auto":
-			cookie, err := r.Cookie(cookieName)
+			token, err = c.Cookie(cookieName)
 			if err != nil {
-				token = r.URL.Query().Get(queryParamKey)
-			} else {
-				token = cookie.Value
+				token, _ = c.GetQuery(queryParamKey)
 			}
 			if token == "" {
-				// Redirect to login if all hopes lost
-				http.Redirect(w, r, "/login", http.StatusFound)
-				return
+				redirect(c)
 			}
 		case "bypass":
-			next.ServeHTTP(w, r)
+			c.Next()
 		}
 
 		claims := &Claims{}
@@ -118,27 +122,22 @@ func authenticate(next http.Handler, jwtSecret []byte) http.Handler {
 
 		if err != nil || !parsedToken.Valid {
 			// Redirect to login if token is invalid
-			http.Redirect(w, r, "/login", http.StatusFound)
-			return
+			redirect(c)
 		}
 
 		// Token is valid, set a session cookie
-		http.SetCookie(w, &http.Cookie{
-			Name:     cookieName,
-			Value:    token, // Use the token as session token for simplicity
-			Expires:  time.Now().Add(time.Duration(sessionLifeTime) * time.Hour),
-			HttpOnly: true,
-			Secure:   secureCookie,
-			Path:     "/",
-		})
+		c.SetCookie(cookieName, token, (time.Now().Add(time.Duration(sessionLifeTime) * time.Hour)).Second(), "/", "", secureCookie, true)
 		// Token is valid, continue to the requested resource
-		next.ServeHTTP(w, r)
-	})
+		c.Next()
+	}
 }
+
+var jwtSecret []byte
 
 func main() {
 	// Command-line arguments
 	staticDir := flag.String("web-root", "./static", "Directory to serve static files from")
+	publicDir := flag.String("public-root", "./pub", "Public Directory to serve static files from")
 	port := flag.String("port", "8080", "Port to listen on")
 
 	flag.Usage = func() {
@@ -164,10 +163,11 @@ func main() {
 	flag.Parse()
 
 	// Environment variable for JWT secret
-	jwtSecret := os.Getenv("JWT_SECRET")
-	if jwtSecret == "" {
+	jwtSecretStr := os.Getenv("JWT_SECRET")
+	if jwtSecretStr == "" {
 		log.Fatal("JWT_SECRET environment variable is required")
 	}
+	jwtSecret = []byte(jwtSecretStr)
 
 	cookieName = os.Getenv("SESSION_COOKIE_NAME")
 	if cookieName == "" {
@@ -204,6 +204,13 @@ func main() {
 	if webRoot == "" {
 		webRoot = *staticDir
 	}
+	fmt.Fprintf(os.Stderr, "[INFO] Web root: %s\n", webRoot)
+
+	publicRoot = os.Getenv("PUBLIC_ROOT")
+	if publicRoot == "" {
+		publicRoot = *publicDir
+	}
+	fmt.Fprintf(os.Stderr, "[INFO] Public root: %s\n", publicRoot)
 
 	sessionLifeTimeStr := os.Getenv("SESSION_LIFE_TIME")
 	if sessionLifeTimeStr == "" {
@@ -214,32 +221,20 @@ func main() {
 		}
 	}
 
-	staticFileServer := http.FileServer(http.Dir(webRoot))
-
-	var staticRoutePath, stripPrefix string
-	if strings.HasPrefix(webRoot, ".") {
-		stripPrefix = strings.TrimPrefix(webRoot, ".")
-		staticRoutePath = stripPrefix + "/"
-	} else {
-		staticRoutePath = webRoot + "/"
-		stripPrefix = webRoot
-	}
-
-	// Routes
-	http.Handle(staticRoutePath, http.StripPrefix(stripPrefix, authenticate(staticFileServer, []byte(jwtSecret))))
-	http.Handle("/login", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		loginPageHandler(w, r, []byte(jwtSecret))
-	}))
-	http.Handle("/", authenticate(http.HandlerFunc(homeHandler), []byte(jwtSecret)))
+	router := gin.Default()
+	router.Any("/login", loginPageHandler)
+	router.Any(publicRoot)
+	rPrivate := router.Group(webRoot, AuthenticateMidleware())
+	rPrivate.StaticFS("/", http.Dir(webRoot))
 
 	fmt.Printf("Server is running on port %s\n", listenPort)
-	log.Fatal(http.ListenAndServe(":"+listenPort, nil))
+	router.Run(":" + listenPort)
 }
 
 // Handler for the home page (or other protected resources)
-func homeHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html")
-	w.Write([]byte(`
+func homeHandler(c *gin.Context) {
+	c.Writer.Header().Set("Content-Type", "text/html")
+	c.Writer.Write([]byte(`
 	<!DOCTYPE html>
 	<html>
 	<head>
