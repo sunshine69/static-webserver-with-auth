@@ -69,7 +69,7 @@ func loginPageHandler(c *gin.Context) {
 			return
 		}
 		// Token is valid, set a session cookie
-		c.SetCookie(cookieName, token, (time.Now().Add(cookieLastDuration)).Second(), "/", "", secureCookie, true)
+		c.SetCookie(cookieName, token, int(cookieLastDuration.Seconds()), "/", "", secureCookie, true)
 
 		// Redirect to the home page or protected resource
 		c.Redirect(http.StatusFound, strings.TrimPrefix(webRoot, "."))
@@ -120,7 +120,7 @@ func AuthenticateMidleware() gin.HandlerFunc {
 			redirect(c)
 		}
 		// Token is valid, set a session cookie
-		c.SetCookie(cookieName, token, (time.Now().Add(cookieLastDuration)).Second(), "/", "", secureCookie, true)
+		c.SetCookie(cookieName, token, int(cookieLastDuration.Seconds()), "/", "", secureCookie, true)
 		// Token is valid, continue to the requested resource
 		c.Next()
 	}
