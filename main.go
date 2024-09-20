@@ -23,7 +23,7 @@ type Claims struct {
 
 var cookieName, authType, queryParamKey string
 var secureCookie bool
-var sessionLifeTime int
+var cookieLastDuration time.Duration
 
 // Path to the web root dir. This will be relative path to the current root; like ./static. The route path will be absolute like /static
 // and then be stripped off. This can be an absolute path though started with / but the route will be the same exactly absolute path
@@ -55,10 +55,8 @@ var loginTemplate = template.Must(template.New("login").Parse(`
 func loginPageHandler(c *gin.Context) {
 	switch c.Request.Method {
 	case http.MethodGet:
-		fmt.Fprintf(os.Stderr, "[LOGIN GET] \n")
 		loginTemplate.Execute(c.Writer, gin.H{})
 	case http.MethodPost:
-		fmt.Fprintf(os.Stderr, "[LOGIN POST] \n")
 		token, _ := c.GetPostForm("token")
 		claims := &Claims{}
 		// Parse and validate the JWT token
@@ -67,16 +65,13 @@ func loginPageHandler(c *gin.Context) {
 		}, jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Name}))
 
 		if err != nil || !parsedToken.Valid {
-			fmt.Fprintf(os.Stderr, "[ERROR] %s\n", err.Error())
 			c.AbortWithStatus(http.StatusUnauthorized)
 			return
 		}
 		// Token is valid, set a session cookie
-		fmt.Fprintf(os.Stderr, "[SET COOKIE] \n")
-		c.SetCookie(cookieName, token, (time.Now().Add(time.Duration(sessionLifeTime) * time.Hour)).Second(), "/", "192.168.20.18", secureCookie, true)
+		c.SetCookie(cookieName, token, (time.Now().Add(cookieLastDuration)).Second(), "/", "", secureCookie, true)
 
 		// Redirect to the home page or protected resource
-		fmt.Fprintf(os.Stderr, "[REDIRECT] \n")
 		c.Redirect(http.StatusFound, strings.TrimPrefix(webRoot, "."))
 		return
 	}
@@ -124,9 +119,8 @@ func AuthenticateMidleware() gin.HandlerFunc {
 			// Redirect to login if token is invalid
 			redirect(c)
 		}
-
 		// Token is valid, set a session cookie
-		c.SetCookie(cookieName, token, (time.Now().Add(time.Duration(sessionLifeTime) * time.Hour)).Second(), "/", "", secureCookie, true)
+		c.SetCookie(cookieName, token, (time.Now().Add(cookieLastDuration)).Second(), "/", "", secureCookie, true)
 		// Token is valid, continue to the requested resource
 		c.Next()
 	}
@@ -214,12 +208,9 @@ func main() {
 
 	sessionLifeTimeStr := os.Getenv("SESSION_LIFE_TIME")
 	if sessionLifeTimeStr == "" {
-		sessionLifeTime = 1
-	} else {
-		if sessionLifeTime, err = strconv.Atoi(sessionLifeTimeStr); err != nil {
-			sessionLifeTime = 1
-		}
+		sessionLifeTimeStr = "1h"
 	}
+	cookieLastDuration, _ = time.ParseDuration(sessionLifeTimeStr)
 
 	router := gin.Default()
 	router.Any("/login", loginPageHandler)
