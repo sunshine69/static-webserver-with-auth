@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"flag"
 	"fmt"
 	"html/template"
@@ -11,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -19,6 +23,18 @@ type Claims struct {
 	Username string `json:"username"`
 	jwt.RegisteredClaims
 }
+
+var cookieName, authType, queryParamKey string
+var secureCookie bool
+var cookieLastDuration time.Duration
+
+// Path to the web root dir. This will be relative path to the current root; like ./static. The route path will be absolute like /static
+// and then be stripped off. This can be an absolute path though started with / but the route will be the same exactly absolute path
+// No slash / at the end
+var (
+	webRoot    string
+	publicRoot string
+)
 
 // Login page HTML template
 var loginTemplate = template.Must(template.New("login").Parse(`
@@ -38,118 +54,136 @@ var loginTemplate = template.Must(template.New("login").Parse(`
 </html>
 `))
 
-var cookieName, authType, queryParamKey string
-var secureCookie bool
-var sessionLifeTime int
-
-// Path to the web root dir. This will be relative path to the current root; like ./static. The route path will be absolute like /static
-// and then be stripped off. This can be an absolute path though started with / but the route will be the same exactly absolute path
-// No slash / at the end
-var webRoot string
+func ParseJWTToken(token string, claims *Claims) (parsedToken *jwt.Token, err error) {
+	switch signingMethod {
+	case "HS256":
+		parsedToken, err = jwt.ParseWithClaims(token, claims, func(token *jwt.Token) (interface{}, error) {
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+			}
+			return jwtSecret, nil
+		}, jwtParserOptionsLookup[signingMethod])
+	case "RS256":
+		parsedToken, err = jwt.ParseWithClaims(token, claims, func(token *jwt.Token) (interface{}, error) {
+			if _, ok := token.Method.(*jwt.SigningMethodRSA); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+			}
+			return rsaPubKey, nil
+		}, jwtParserOptionsLookup[signingMethod])
+	}
+	return
+}
 
 // Handler for the login page
-func loginPageHandler(w http.ResponseWriter, r *http.Request, jwtSecret []byte) {
-	if r.Method == http.MethodGet {
-		loginTemplate.Execute(w, nil)
-	} else if r.Method == http.MethodPost {
-		token := r.FormValue("token")
+func loginPageHandler(c *gin.Context) {
+	switch c.Request.Method {
+	case http.MethodGet:
+		loginTemplate.Execute(c.Writer, gin.H{})
+	case http.MethodPost:
+		token, _ := c.GetPostForm("token")
 		claims := &Claims{}
-
 		// Parse and validate the JWT token
-		parsedToken, err := jwt.ParseWithClaims(token, claims, func(token *jwt.Token) (interface{}, error) {
-			return jwtSecret, nil
-		}, jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Name}))
-
+		parsedToken, err := ParseJWTToken(token, claims)
 		if err != nil || !parsedToken.Valid {
-			http.Error(w, "Invalid token", http.StatusUnauthorized)
+			fmt.Fprintf(os.Stderr, "[ERROR] %s\n", err.Error())
+			c.AbortWithStatus(http.StatusUnauthorized)
 			return
 		}
-
 		// Token is valid, set a session cookie
-		http.SetCookie(w, &http.Cookie{
-			Name:     cookieName,
-			Value:    token, // Use the token as session token for simplicity
-			Expires:  time.Now().Add(time.Duration(sessionLifeTime) * time.Hour),
-			HttpOnly: true,
-			Secure:   secureCookie,
-			Path:     "/",
-		})
+		c.SetCookie(cookieName, token, int(cookieLastDuration.Seconds()), "/", "", secureCookie, true)
 
 		// Redirect to the home page or protected resource
-		http.Redirect(w, r, "/", http.StatusFound)
+		c.Redirect(http.StatusFound, strings.TrimPrefix(webRoot, "."))
+		return
 	}
 }
 
 // Middleware to check JWT in cookies
-func authenticate(next http.Handler, jwtSecret []byte) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func AuthenticateMidleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
 		var token string
+		var err error
+		redirect := func(c *gin.Context) {
+			// Redirect to login if all hopes lost
+			c.Redirect(http.StatusFound, "/login")
+			c.Abort()
+		}
 		switch authType {
 		case "jwt-cookie":
-			cookie, err := r.Cookie(cookieName)
+			token, err = c.Cookie(cookieName)
 			if err != nil {
-				// Redirect to login if no session cookie
-				http.Redirect(w, r, "/login", http.StatusFound)
-				return
+				redirect(c)
 			}
-			token = cookie.Value
 		case "jwt-query-param":
-			token = r.URL.Query().Get(queryParamKey)
+			token, _ = c.GetQuery(queryParamKey)
+			if token == "" {
+				redirect(c)
+			}
 		case "auto":
-			cookie, err := r.Cookie(cookieName)
+			token, err = c.Cookie(cookieName)
 			if err != nil {
-				token = r.URL.Query().Get(queryParamKey)
-			} else {
-				token = cookie.Value
+				token, _ = c.GetQuery(queryParamKey)
 			}
 			if token == "" {
-				// Redirect to login if all hopes lost
-				http.Redirect(w, r, "/login", http.StatusFound)
-				return
+				redirect(c)
 			}
 		case "bypass":
-			next.ServeHTTP(w, r)
+			c.Next()
 		}
 
 		claims := &Claims{}
-		parsedToken, err := jwt.ParseWithClaims(token, claims, func(token *jwt.Token) (interface{}, error) {
-			return jwtSecret, nil
-		}, jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Name}))
-
+		parsedToken, err := ParseJWTToken(token, claims)
 		if err != nil || !parsedToken.Valid {
 			// Redirect to login if token is invalid
-			http.Redirect(w, r, "/login", http.StatusFound)
-			return
+			fmt.Fprintf(os.Stderr, "[ERROR] %s\n", err.Error())
+			redirect(c)
 		}
-
+		// if claims, ok := parsedToken.Claims.(jwt.MapClaims); ok {
+		// 	// Doing something more with claims
+		// 	fmt.Println(claims["foo"], claims["nbf"])
+		// } else {
+		// 	fmt.Println(err)
+		// }
 		// Token is valid, set a session cookie
-		http.SetCookie(w, &http.Cookie{
-			Name:     cookieName,
-			Value:    token, // Use the token as session token for simplicity
-			Expires:  time.Now().Add(time.Duration(sessionLifeTime) * time.Hour),
-			HttpOnly: true,
-			Secure:   secureCookie,
-			Path:     "/",
-		})
+		c.SetCookie(cookieName, token, int(cookieLastDuration.Seconds()), "/", "", secureCookie, true)
 		// Token is valid, continue to the requested resource
-		next.ServeHTTP(w, r)
-	})
+		c.Next()
+	}
 }
 
+var (
+	jwtSecret              []byte
+	signingMethod          string
+	rsaPubKey              *rsa.PublicKey
+	jwtParserOptionsLookup map[string]jwt.ParserOption
+)
+
 func main() {
+	jwtParserOptionsLookup = map[string]jwt.ParserOption{ // Add more options here if u want to support more than these
+		"HS256": jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Name}),
+		"RS256": jwt.WithValidMethods([]string{jwt.SigningMethodRS256.Name}),
+	}
 	// Command-line arguments
 	staticDir := flag.String("web-root", "./static", "Directory to serve static files from")
+	publicDir := flag.String("public-root", "", "Public Directory to serve static files from")
 	port := flag.String("port", "8080", "Port to listen on")
+	flag.StringVar(&signingMethod, "jwt-sign", "HS256", "JWT Signing method. Value can be HS256 (HMAC using SHA256) or RS256 (RSA using SHA256)")
+	rsaPubKeyPath := flag.String("rsa-public-key", "", "RSA public key used when signing method is RS256")
 
 	flag.Usage = func() {
 		flag.PrintDefaults()
 		fmt.Println(`           
 							***** static web server with jwt auth *****
-		This web server serves static files and protected with jwt auth. Apart from command flags the enn vars below will override it
+		This web server serves static files and protected with jwt auth. Apart from command flags the env vars below will override it
 		- JWT_SECRET - The secret to validate the jwt token
 		- SESSION_COOKIE_NAME - the session cookie name used to get the jwt token. Default is statis_web_srv_session
-		- WEB_ROOT - The directory path to serve files from. Can be relative path to the current dir, or absolute path.
+
+		- WEB_ROOT - The protected directory path to serve files from. Can be relative path to the current dir, or absolute path.
+		- PUBLIC_ROOT - The non protected directory path to serve files from. Can be relative path to the current dir, or absolute path.
+		  public dir should be relative to the WEB_ROOT to avoid route conflict if possible.
+
 		  The html path will be the same without dot if it is relative. Override cmd flag 'web-root'
+
 		- PORT - http port to listen. Default 8080.
 		- AUTH_TYPE - default is jwt-cookie. Can be:
 		  - 'jwt-cookie' - store and get the jwt token from session cookie
@@ -157,16 +191,34 @@ func main() {
 		    - QUERY_PARAM_KEY - The parameter key. Default is 'access_token'; that is the url is like https://<domain>/path?access_token=<jwt-token-string>
 		  - 'auto' - This will try to get token from session cookie and if not then read from the query param. When it is validated a new session cookie 
 		    will be set.
-		- SESSION_LIFE_TIME - the lifetime of the session cookie. Default is 1 (that is 1 hour)
+
+		- SESSION_LIFE_TIME - the lifetime of the session cookie. Default is 1h (that is 1 hour)
 		- SECURE_COOKIE - set the secure property of the session cookie. Default is true. Set to false if you are testing and not using https
 		`)
 	}
 	flag.Parse()
 
-	// Environment variable for JWT secret
-	jwtSecret := os.Getenv("JWT_SECRET")
-	if jwtSecret == "" {
-		log.Fatal("JWT_SECRET environment variable is required")
+	switch signingMethod {
+	case "HS256":
+		jwtSecretStr := os.Getenv("JWT_SECRET")
+		if jwtSecretStr == "" {
+			log.Fatal("JWT_SECRET environment variable is required")
+		}
+		jwtSecret = []byte(jwtSecretStr)
+	case "RS256":
+		if *rsaPubKeyPath == "" {
+			panic("[ERROR] Option jwt-sign is RS256 but option rsa-public-key is not provided\n")
+		}
+		rsaPubKeyBt, err := os.ReadFile(*rsaPubKeyPath)
+		if err != nil {
+			panic("[ERROR] can not read RSA Public Key content. Check your public key\n")
+		}
+		spkiBlock, _ := pem.Decode(rsaPubKeyBt)
+		pubInterface, err := x509.ParsePKIXPublicKey(spkiBlock.Bytes)
+		if err != nil {
+			panic("[ERROR] x509.ParsePKIXPublicKey " + err.Error())
+		}
+		rsaPubKey = pubInterface.(*rsa.PublicKey)
 	}
 
 	cookieName = os.Getenv("SESSION_COOKIE_NAME")
@@ -204,51 +256,30 @@ func main() {
 	if webRoot == "" {
 		webRoot = *staticDir
 	}
+	fmt.Fprintf(os.Stderr, "[INFO] Web root: %s\n", webRoot)
+
+	publicRoot = os.Getenv("PUBLIC_ROOT")
+	if publicRoot == "" {
+		publicRoot = *publicDir
+	}
 
 	sessionLifeTimeStr := os.Getenv("SESSION_LIFE_TIME")
 	if sessionLifeTimeStr == "" {
-		sessionLifeTime = 1
-	} else {
-		if sessionLifeTime, err = strconv.Atoi(sessionLifeTimeStr); err != nil {
-			sessionLifeTime = 1
-		}
+		sessionLifeTimeStr = "1h"
 	}
+	cookieLastDuration, _ = time.ParseDuration(sessionLifeTimeStr)
 
-	staticFileServer := http.FileServer(http.Dir(webRoot))
-
-	var staticRoutePath, stripPrefix string
-	if strings.HasPrefix(webRoot, ".") {
-		stripPrefix = strings.TrimPrefix(webRoot, ".")
-		staticRoutePath = stripPrefix + "/"
-	} else {
-		staticRoutePath = webRoot + "/"
-		stripPrefix = webRoot
+	router := gin.Default()
+	router.Any("/login", loginPageHandler)
+	if publicRoot != "" {
+		fmt.Fprintf(os.Stderr, "[INFO] Public root: %s\n", publicRoot)
+		rPublic := router.Group(publicRoot)
+		rPublic.StaticFS("/", http.Dir(publicRoot))
 	}
+	rPrivate := router.Group(webRoot, AuthenticateMidleware())
+	rPrivate.StaticFS("/", http.Dir(webRoot))
 
-	// Routes
-	http.Handle(staticRoutePath, http.StripPrefix(stripPrefix, authenticate(staticFileServer, []byte(jwtSecret))))
-	http.Handle("/login", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		loginPageHandler(w, r, []byte(jwtSecret))
-	}))
-	http.Handle("/", authenticate(http.HandlerFunc(homeHandler), []byte(jwtSecret)))
-
-	fmt.Printf("Server is running on port %s\n", listenPort)
-	log.Fatal(http.ListenAndServe(":"+listenPort, nil))
-}
-
-// Handler for the home page (or other protected resources)
-func homeHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html")
-	w.Write([]byte(`
-	<!DOCTYPE html>
-	<html>
-	<head>
-		<title>Home</title>
-	</head>
-	<body>
-		<h1>Welcome to the protected resource</h1>
-		<a href="/static/file.txt">Access static file</a>
-	</body>
-	</html>
-	`))
+	fmt.Fprintf(os.Stderr, "Signing method %s\n", signingMethod)
+	fmt.Fprintf(os.Stderr, "Server is running on port %s\n", listenPort)
+	router.Run(":" + listenPort)
 }
