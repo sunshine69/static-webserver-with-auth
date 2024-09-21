@@ -18,62 +18,6 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// JWT Claims structure
-type Claims struct {
-	Username string `json:"username"`
-	jwt.RegisteredClaims
-}
-
-var cookieName, authType, queryParamKey string
-var secureCookie bool
-var cookieLastDuration time.Duration
-
-// Path to the web root dir. This will be relative path to the current root; like ./static. The route path will be absolute like /static
-// and then be stripped off. This can be an absolute path though started with / but the route will be the same exactly absolute path
-// No slash / at the end
-var (
-	webRoot    string
-	publicRoot string
-)
-
-// Login page HTML template
-var loginTemplate = template.Must(template.New("login").Parse(`
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Login</title>
-</head>
-<body>
-    <h2>Login with JWT</h2>
-    <form method="POST" action="/login">
-        <label for="token">JWT Token:</label>
-        <input type="text" id="token" name="token" required>
-        <button type="submit">Login</button>
-    </form>
-</body>
-</html>
-`))
-
-func ParseJWTToken(token string, claims *Claims) (parsedToken *jwt.Token, err error) {
-	switch signingMethod {
-	case "HS256":
-		parsedToken, err = jwt.ParseWithClaims(token, claims, func(token *jwt.Token) (interface{}, error) {
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-			}
-			return jwtSecret, nil
-		}, jwtParserOptionsLookup[signingMethod])
-	case "RS256":
-		parsedToken, err = jwt.ParseWithClaims(token, claims, func(token *jwt.Token) (interface{}, error) {
-			if _, ok := token.Method.(*jwt.SigningMethodRSA); !ok {
-				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-			}
-			return rsaPubKey, nil
-		}, jwtParserOptionsLookup[signingMethod])
-	}
-	return
-}
-
 // Handler for the login page
 func loginPageHandler(c *gin.Context) {
 	switch c.Request.Method {
@@ -151,12 +95,67 @@ func AuthenticateMidleware() gin.HandlerFunc {
 	}
 }
 
+// Login page HTML template
+var loginTemplate = template.Must(template.New("login").Parse(`
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Login</title>
+</head>
+<body>
+    <h2>Login with JWT</h2>
+    <form method="POST" action="/login">
+        <label for="token">JWT Token:</label>
+        <input type="text" id="token" name="token" required>
+        <button type="submit">Login</button>
+    </form>
+</body>
+</html>
+`))
+
+// JWT Claims structure
+type Claims struct {
+	Username string `json:"username"`
+	jwt.RegisteredClaims
+}
+
 var (
-	jwtSecret              []byte
-	signingMethod          string
-	rsaPubKey              *rsa.PublicKey
-	jwtParserOptionsLookup map[string]jwt.ParserOption
+	jwtSecret                           []byte
+	signingMethod                       string
+	rsaPubKey                           *rsa.PublicKey
+	jwtParserOptionsLookup              map[string]jwt.ParserOption
+	cookieName, authType, queryParamKey string
+	secureCookie                        bool
+	cookieLastDuration                  time.Duration
+
+	// Path to the web root dir. This will be relative path to the current root; like ./static. The route path will be absolute like /static
+	// and then be stripped off. This can be an absolute path though started with / but the route will be the same exactly absolute path
+	// No slash / at the end
+	webRoot    string
+	publicRoot string
 )
+
+// Parse the jwt token. If you want to customise the auth, change it in here. This function is used in the middleware and in login handler
+func ParseJWTToken(token string, claims *Claims) (parsedToken *jwt.Token, err error) {
+	switch signingMethod {
+	case "HS256":
+		parsedToken, err = jwt.ParseWithClaims(token, claims, func(token *jwt.Token) (interface{}, error) {
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+			}
+			return jwtSecret, nil
+		}, jwtParserOptionsLookup[signingMethod])
+
+	case "RS256":
+		parsedToken, err = jwt.ParseWithClaims(token, claims, func(token *jwt.Token) (interface{}, error) {
+			if _, ok := token.Method.(*jwt.SigningMethodRSA); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+			}
+			return rsaPubKey, nil
+		}, jwtParserOptionsLookup[signingMethod])
+	}
+	return
+}
 
 func main() {
 	jwtParserOptionsLookup = map[string]jwt.ParserOption{ // Add more options here if u want to support more than these
@@ -191,6 +190,7 @@ func main() {
 		    - QUERY_PARAM_KEY - The parameter key. Default is 'access_token'; that is the url is like https://<domain>/path?access_token=<jwt-token-string>
 		  - 'auto' - This will try to get token from session cookie and if not then read from the query param. When it is validated a new session cookie 
 		    will be set.
+		  - 'bypass' - This will disable authentication totally
 
 		- SESSION_LIFE_TIME - the lifetime of the session cookie. Default is 1h (that is 1 hour)
 		- SECURE_COOKIE - set the secure property of the session cookie. Default is true. Set to false if you are testing and not using https
