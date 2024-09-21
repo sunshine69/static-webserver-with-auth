@@ -1,6 +1,5 @@
 This is a static web server with jwt authentication enabled to protect resources.
 
-
 Testing ...
 
 Build
@@ -17,7 +16,7 @@ env JWT_SECRET=abc AUTH_TYPE=auto SECURE_COOKIE=false WEB_ROOT=./Private PUBLIC_
 
 docker image per release is available. Try (add more option -e as appropriate, and the tag is the release version)
 ```
-docker run --rm -p 8080:8080 -v $PWD:/www -e WEB_ROOT=/www -e JWT_SECRET=123 stevekieu/static-webserver-with-jwt:v0.6
+docker run --rm -p 8080:8080 -v $PWD:/www -e WEB_ROOT=/www -e JWT_SECRET=123 -e AUTH_TYPE=auto -e SECURE_COOKIE=false stevekieu/static-webserver-with-jwt:v1.0.0
 ```
 
 The url will be http://localhost:8080/www/
@@ -27,8 +26,10 @@ Generate a valid jwt token go to https://jwt.io/ and generate one, use the secre
 Use it in curl command like this
 
 ```
-curl -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IlN0ZXZlIERvZSIsImlhdCI6MTUxNjIzOTAyMn0.SrZbvVzwKiBP6D3OmpnWugYgE5AhH6XKUzyw_77AMq4" 'http://localhost:8080'
+curl 'http://localhost:8080/www?access_token=<your-jwt-token>'
 ```
+
+When you access the site via https reverse proxy for example running on k8s, remove the env var SECURE_COOKIE=false so by default it is true.
 
 We can extend the expire token and verify username etc.
 

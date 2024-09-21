@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"flag"
 	"fmt"
 	"html/template"
@@ -59,14 +62,14 @@ func ParseJWTToken(token string, claims *Claims) (parsedToken *jwt.Token, err er
 				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 			}
 			return jwtSecret, nil
-		}, jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Name}))
+		}, jwtParserOptionsLookup[signingMethod])
 	case "RS256":
 		parsedToken, err = jwt.ParseWithClaims(token, claims, func(token *jwt.Token) (interface{}, error) {
 			if _, ok := token.Method.(*jwt.SigningMethodRSA); !ok {
 				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 			}
-			return rsaPubKeyContent, nil
-		})
+			return rsaPubKey, nil
+		}, jwtParserOptionsLookup[signingMethod])
 	}
 	return
 }
@@ -82,6 +85,7 @@ func loginPageHandler(c *gin.Context) {
 		// Parse and validate the JWT token
 		parsedToken, err := ParseJWTToken(token, claims)
 		if err != nil || !parsedToken.Valid {
+			fmt.Fprintf(os.Stderr, "[ERROR] %s\n", err.Error())
 			c.AbortWithStatus(http.StatusUnauthorized)
 			return
 		}
@@ -131,6 +135,7 @@ func AuthenticateMidleware() gin.HandlerFunc {
 		parsedToken, err := ParseJWTToken(token, claims)
 		if err != nil || !parsedToken.Valid {
 			// Redirect to login if token is invalid
+			fmt.Fprintf(os.Stderr, "[ERROR] %s\n", err.Error())
 			redirect(c)
 		}
 		// if claims, ok := parsedToken.Claims.(jwt.MapClaims); ok {
@@ -147,17 +152,23 @@ func AuthenticateMidleware() gin.HandlerFunc {
 }
 
 var (
-	jwtSecret                       []byte
-	signingMethod, rsaPubKeyContent string
+	jwtSecret              []byte
+	signingMethod          string
+	rsaPubKey              *rsa.PublicKey
+	jwtParserOptionsLookup map[string]jwt.ParserOption
 )
 
 func main() {
+	jwtParserOptionsLookup = map[string]jwt.ParserOption{ // Add more options here if u want to support more than these
+		"HS256": jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Name}),
+		"RS256": jwt.WithValidMethods([]string{jwt.SigningMethodRS256.Name}),
+	}
 	// Command-line arguments
 	staticDir := flag.String("web-root", "./static", "Directory to serve static files from")
-	publicDir := flag.String("public-root", "./pub", "Public Directory to serve static files from")
+	publicDir := flag.String("public-root", "", "Public Directory to serve static files from")
 	port := flag.String("port", "8080", "Port to listen on")
 	flag.StringVar(&signingMethod, "jwt-sign", "HS256", "JWT Signing method. Value can be HS256 (HMAC using SHA256) or RS256 (RSA using SHA256)")
-	rsaPubKey := flag.String("rsa-public-key", "", "RSA public key used when signing method is RS256")
+	rsaPubKeyPath := flag.String("rsa-public-key", "", "RSA public key used when signing method is RS256")
 
 	flag.Usage = func() {
 		flag.PrintDefaults()
@@ -180,7 +191,7 @@ func main() {
 		    - QUERY_PARAM_KEY - The parameter key. Default is 'access_token'; that is the url is like https://<domain>/path?access_token=<jwt-token-string>
 		  - 'auto' - This will try to get token from session cookie and if not then read from the query param. When it is validated a new session cookie 
 		    will be set.
-			
+
 		- SESSION_LIFE_TIME - the lifetime of the session cookie. Default is 1h (that is 1 hour)
 		- SECURE_COOKIE - set the secure property of the session cookie. Default is true. Set to false if you are testing and not using https
 		`)
@@ -195,14 +206,19 @@ func main() {
 		}
 		jwtSecret = []byte(jwtSecretStr)
 	case "RS256":
-		if *rsaPubKey == "" {
+		if *rsaPubKeyPath == "" {
 			panic("[ERROR] Option jwt-sign is RS256 but option rsa-public-key is not provided\n")
 		}
-		rsaPubKeyBt, err := os.ReadFile(*rsaPubKey)
+		rsaPubKeyBt, err := os.ReadFile(*rsaPubKeyPath)
 		if err != nil {
 			panic("[ERROR] can not read RSA Public Key content. Check your public key\n")
 		}
-		rsaPubKeyContent = string(rsaPubKeyBt)
+		spkiBlock, _ := pem.Decode(rsaPubKeyBt)
+		pubInterface, err := x509.ParsePKIXPublicKey(spkiBlock.Bytes)
+		if err != nil {
+			panic("[ERROR] x509.ParsePKIXPublicKey " + err.Error())
+		}
+		rsaPubKey = pubInterface.(*rsa.PublicKey)
 	}
 
 	cookieName = os.Getenv("SESSION_COOKIE_NAME")
@@ -246,7 +262,6 @@ func main() {
 	if publicRoot == "" {
 		publicRoot = *publicDir
 	}
-	fmt.Fprintf(os.Stderr, "[INFO] Public root: %s\n", publicRoot)
 
 	sessionLifeTimeStr := os.Getenv("SESSION_LIFE_TIME")
 	if sessionLifeTimeStr == "" {
@@ -256,8 +271,11 @@ func main() {
 
 	router := gin.Default()
 	router.Any("/login", loginPageHandler)
-	rPublic := router.Group(publicRoot)
-	rPublic.StaticFS("/", http.Dir(publicRoot))
+	if publicRoot != "" {
+		fmt.Fprintf(os.Stderr, "[INFO] Public root: %s\n", publicRoot)
+		rPublic := router.Group(publicRoot)
+		rPublic.StaticFS("/", http.Dir(publicRoot))
+	}
 	rPrivate := router.Group(webRoot, AuthenticateMidleware())
 	rPrivate.StaticFS("/", http.Dir(webRoot))
 
