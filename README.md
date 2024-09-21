@@ -9,10 +9,10 @@ Build
 env CGO_ENABLED=0 go build -trimpath -ldflags="-X main.version=v0.1 -extldflags=-static -w -s" .
 ```
 
-Run
+Run like this. Notice that we use relative path to the current working directory. If you want to have absolute path - set it in WEB_ROOT, but PUBLIC_ROOT should be relative to WEB_ROOT to avoid route conflict.
 
 ```
-env JWT_SECRET=myhighlysecret ./static-webserver-with-jwt
+env JWT_SECRET=abc AUTH_TYPE=auto SECURE_COOKIE=false WEB_ROOT=./Private PUBLIC_ROOT=./Public go run .
 ```
 
 docker image per release is available. Try (add more option -e as appropriate, and the tag is the release version)
@@ -22,7 +22,7 @@ docker run --rm -p 8080:8080 -v $PWD:/www -e WEB_ROOT=/www -e JWT_SECRET=123 ste
 
 The url will be http://localhost:8080/www/
 
-Generate a valid jwt token go to https://jwt.io/ and geenrate one, use the secrets is the one you set when run the program.
+Generate a valid jwt token go to https://jwt.io/ and generate one, use the secrets is the one you set when run the program.
 
 Use it in curl command like this
 

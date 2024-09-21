@@ -150,7 +150,7 @@ func main() {
 		    - QUERY_PARAM_KEY - The parameter key. Default is 'access_token'; that is the url is like https://<domain>/path?access_token=<jwt-token-string>
 		  - 'auto' - This will try to get token from session cookie and if not then read from the query param. When it is validated a new session cookie 
 		    will be set.
-		- SESSION_LIFE_TIME - the lifetime of the session cookie. Default is 1 (that is 1 hour)
+		- SESSION_LIFE_TIME - the lifetime of the session cookie. Default is 1h (that is 1 hour)
 		- SECURE_COOKIE - set the secure property of the session cookie. Default is true. Set to false if you are testing and not using https
 		`)
 	}
@@ -214,7 +214,8 @@ func main() {
 
 	router := gin.Default()
 	router.Any("/login", loginPageHandler)
-	router.Any(publicRoot)
+	rPublic := router.Group(publicRoot)
+	rPublic.StaticFS("/", http.Dir(publicRoot))
 	rPrivate := router.Group(webRoot, AuthenticateMidleware())
 	rPrivate.StaticFS("/", http.Dir(webRoot))
 
