@@ -22,7 +22,7 @@ import (
 func loginPageHandler(c *gin.Context) {
 	switch c.Request.Method {
 	case http.MethodGet:
-		loginTemplate.Execute(c.Writer, gin.H{})
+		loginTemplate.Execute(c.Writer, gin.H{"login_path": loginPath})
 	case http.MethodPost:
 		token, _ := c.GetPostForm("token")
 		claims := &Claims{}
@@ -49,7 +49,7 @@ func AuthenticateMidleware() gin.HandlerFunc {
 		var err error
 		redirect := func(c *gin.Context) {
 			// Redirect to login if all hopes lost
-			c.Redirect(http.StatusFound, "/login")
+			c.Redirect(http.StatusFound, loginPath)
 			c.Abort()
 		}
 		switch authType {
@@ -103,8 +103,8 @@ var loginTemplate = template.Must(template.New("login").Parse(`
     <title>Login</title>
 </head>
 <body>
-    <h2>Login with JWT</h2>
-    <form method="POST" action="/login">
+    <h2>Login with JWT</h2>	
+    <form method="POST" action="{{ .login_path }}">
         <label for="token">JWT Token:</label>
         <input type="text" id="token" name="token" required>
         <button type="submit">Login</button>
@@ -133,6 +133,7 @@ var (
 	// No slash / at the end
 	webRoot    string
 	publicRoot string
+	loginPath  string
 )
 
 // Parse the jwt token. If you want to customise the auth, change it in here. This function is used in the middleware and in login handler
@@ -178,10 +179,12 @@ func main() {
 		- SESSION_COOKIE_NAME - the session cookie name used to get the jwt token. Default is statis_web_srv_session
 
 		- WEB_ROOT - The protected directory path to serve files from. Can be relative path to the current dir, or absolute path.
+		  The html path will be the same without dot if it is relative. Override cmd flag '-web-root'
 		- PUBLIC_ROOT - The non protected directory path to serve files from. Can be relative path to the current dir, or absolute path.
-		  public dir should be relative to the WEB_ROOT to avoid route conflict if possible.
-
-		  The html path will be the same without dot if it is relative. Override cmd flag 'web-root'
+		  Override the option '-public-root'	  
+		- LOGIN_PATH - the url path to show the login page. Default is /login.
+		  
+		  Better not to overlap the above three variables
 
 		- PORT - http port to listen. Default 8080.
 		- AUTH_TYPE - default is jwt-cookie. Can be:
@@ -219,6 +222,11 @@ func main() {
 			panic("[ERROR] x509.ParsePKIXPublicKey " + err.Error())
 		}
 		rsaPubKey = pubInterface.(*rsa.PublicKey)
+	}
+
+	loginPath = os.Getenv("LOGIN_PATH")
+	if loginPath == "" {
+		loginPath = "/login"
 	}
 
 	cookieName = os.Getenv("SESSION_COOKIE_NAME")
@@ -270,7 +278,7 @@ func main() {
 	cookieLastDuration, _ = time.ParseDuration(sessionLifeTimeStr)
 
 	router := gin.Default()
-	router.Any("/login", loginPageHandler)
+	router.Any(loginPath, loginPageHandler)
 	if publicRoot != "" {
 		fmt.Fprintf(os.Stderr, "[INFO] Public root: %s\n", publicRoot)
 		rPublic := router.Group(publicRoot)
