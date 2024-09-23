@@ -18,67 +18,11 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// JWT Claims structure
-type Claims struct {
-	Username string `json:"username"`
-	jwt.RegisteredClaims
-}
-
-var cookieName, authType, queryParamKey string
-var secureCookie bool
-var cookieLastDuration time.Duration
-
-// Path to the web root dir. This will be relative path to the current root; like ./static. The route path will be absolute like /static
-// and then be stripped off. This can be an absolute path though started with / but the route will be the same exactly absolute path
-// No slash / at the end
-var (
-	webRoot    string
-	publicRoot string
-)
-
-// Login page HTML template
-var loginTemplate = template.Must(template.New("login").Parse(`
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Login</title>
-</head>
-<body>
-    <h2>Login with JWT</h2>
-    <form method="POST" action="/login">
-        <label for="token">JWT Token:</label>
-        <input type="text" id="token" name="token" required>
-        <button type="submit">Login</button>
-    </form>
-</body>
-</html>
-`))
-
-func ParseJWTToken(token string, claims *Claims) (parsedToken *jwt.Token, err error) {
-	switch signingMethod {
-	case "HS256":
-		parsedToken, err = jwt.ParseWithClaims(token, claims, func(token *jwt.Token) (interface{}, error) {
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-			}
-			return jwtSecret, nil
-		}, jwtParserOptionsLookup[signingMethod])
-	case "RS256":
-		parsedToken, err = jwt.ParseWithClaims(token, claims, func(token *jwt.Token) (interface{}, error) {
-			if _, ok := token.Method.(*jwt.SigningMethodRSA); !ok {
-				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-			}
-			return rsaPubKey, nil
-		}, jwtParserOptionsLookup[signingMethod])
-	}
-	return
-}
-
 // Handler for the login page
 func loginPageHandler(c *gin.Context) {
 	switch c.Request.Method {
 	case http.MethodGet:
-		loginTemplate.Execute(c.Writer, gin.H{})
+		loginTemplate.Execute(c.Writer, gin.H{"login_path": pathBase + loginPath})
 	case http.MethodPost:
 		token, _ := c.GetPostForm("token")
 		claims := &Claims{}
@@ -90,10 +34,10 @@ func loginPageHandler(c *gin.Context) {
 			return
 		}
 		// Token is valid, set a session cookie
-		c.SetCookie(cookieName, token, int(cookieLastDuration.Seconds()), "/", "", secureCookie, true)
+		c.SetCookie(cookieName, token, int(cookieLastDuration.Seconds()), cookiePath, "", secureCookie, true)
 
 		// Redirect to the home page or protected resource
-		c.Redirect(http.StatusFound, strings.TrimPrefix(webRoot, "."))
+		c.Redirect(http.StatusFound, strings.ReplaceAll(pathBase+webRoot, ".", ""))
 		return
 	}
 }
@@ -103,9 +47,17 @@ func AuthenticateMidleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var token string
 		var err error
+		if loginURL == "" { //Trying to parse but it wont work if it is behind complex proxy
+			scheme := "http"
+			if c.Request.TLS != nil {
+				scheme = "https"
+			}
+			loginURL = scheme + "://" + c.Request.Host + pathBase + loginPath
+			fmt.Fprintf(os.Stderr, "[WARN] EXTERNAL_DOMAIN not provided - we assume the loginURL is %s\n", loginURL)
+		}
 		redirect := func(c *gin.Context) {
 			// Redirect to login if all hopes lost
-			c.Redirect(http.StatusFound, "/login")
+			c.Redirect(http.StatusMovedPermanently, loginURL)
 			c.Abort()
 		}
 		switch authType {
@@ -129,6 +81,7 @@ func AuthenticateMidleware() gin.HandlerFunc {
 			}
 		case "bypass":
 			c.Next()
+			return
 		}
 
 		claims := &Claims{}
@@ -145,18 +98,77 @@ func AuthenticateMidleware() gin.HandlerFunc {
 		// 	fmt.Println(err)
 		// }
 		// Token is valid, set a session cookie
-		c.SetCookie(cookieName, token, int(cookieLastDuration.Seconds()), "/", "", secureCookie, true)
+		c.SetCookie(cookieName, token, int(cookieLastDuration.Seconds()), cookiePath, "", secureCookie, true)
 		// Token is valid, continue to the requested resource
 		c.Next()
 	}
 }
 
+// Login page HTML template
+var loginTemplate = template.Must(template.New("login").Parse(`
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Login</title>
+</head>
+<body>
+    <h2>Login with JWT</h2>	
+	<p>You reach here because whether you do not have the token or the token is expired. Please go back to the previous application to re-generate new link with new token or get the token by other means and paste it here</p>
+    <form method="POST" action="{{ .login_path }}">
+        <label for="token">JWT Token:</label>
+        <input type="text" id="token" name="token" required>
+        <button type="submit">Login</button>
+    </form>
+</body>
+</html>
+`))
+
+// JWT Claims structure
+type Claims struct {
+	Username string `json:"username"`
+	jwt.RegisteredClaims
+}
+
 var (
-	jwtSecret              []byte
-	signingMethod          string
-	rsaPubKey              *rsa.PublicKey
-	jwtParserOptionsLookup map[string]jwt.ParserOption
+	jwtSecret                                       []byte
+	signingMethod                                   string
+	rsaPubKey                                       *rsa.PublicKey
+	jwtParserOptionsLookup                          map[string]jwt.ParserOption
+	cookieName, cookiePath, authType, queryParamKey string
+	secureCookie                                    bool
+	cookieLastDuration                              time.Duration
+
+	// Path to the web root dir. This will be relative path to the current root; like ./static. The route path will be absolute like /static
+	// and then be stripped off. This can be an absolute path though started with / but the route will be the same exactly absolute path
+	// No slash / at the end
+	webRoot    string
+	publicRoot string
+	loginPath  string
+	pathBase   string
+	loginURL   string
 )
+
+// Parse the jwt token. If you want to customise the auth, change it in here. This function is used in the middleware and in login handler
+func ParseJWTToken(token string, claims *Claims) (parsedToken *jwt.Token, err error) {
+	switch signingMethod {
+	case "HS256":
+		parsedToken, err = jwt.ParseWithClaims(token, claims, func(token *jwt.Token) (interface{}, error) {
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+			}
+			return jwtSecret, nil
+		}, jwtParserOptionsLookup[signingMethod])
+
+	case "RS256":
+		parsedToken, err = jwt.ParseWithClaims(token, claims, func(token *jwt.Token) (interface{}, error) {
+			if _, ok := token.Method.(*jwt.SigningMethodRSA); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+			}
+			return rsaPubKey, nil
+		}, jwtParserOptionsLookup[signingMethod])
+	}
+	return
+}
 
 func main() {
 	jwtParserOptionsLookup = map[string]jwt.ParserOption{ // Add more options here if u want to support more than these
@@ -164,11 +176,11 @@ func main() {
 		"RS256": jwt.WithValidMethods([]string{jwt.SigningMethodRS256.Name}),
 	}
 	// Command-line arguments
-	staticDir := flag.String("web-root", "./static", "Directory to serve static files from")
-	publicDir := flag.String("public-root", "", "Public Directory to serve static files from")
+	staticDir := flag.String("web-root", "./Private", "Directory to serve static files from")
+	publicDir := flag.String("public-root", "", "Public Directory to serve static files from. Optional")
 	port := flag.String("port", "8080", "Port to listen on")
 	flag.StringVar(&signingMethod, "jwt-sign", "HS256", "JWT Signing method. Value can be HS256 (HMAC using SHA256) or RS256 (RSA using SHA256)")
-	rsaPubKeyPath := flag.String("rsa-public-key", "", "RSA public key used when signing method is RS256")
+	rsaPubKeyPath := flag.String("rsa-public-key", "", "File path - RSA public key used when signing method is RS256")
 
 	flag.Usage = func() {
 		flag.PrintDefaults()
@@ -179,10 +191,15 @@ func main() {
 		- SESSION_COOKIE_NAME - the session cookie name used to get the jwt token. Default is statis_web_srv_session
 
 		- WEB_ROOT - The protected directory path to serve files from. Can be relative path to the current dir, or absolute path.
+		  The html path will be the same without dot if it is relative. Override cmd flag '-web-root'
 		- PUBLIC_ROOT - The non protected directory path to serve files from. Can be relative path to the current dir, or absolute path.
-		  public dir should be relative to the WEB_ROOT to avoid route conflict if possible.
-
-		  The html path will be the same without dot if it is relative. Override cmd flag 'web-root'
+		  Override the option '-public-root'	  
+		- LOGIN_PATH - the url path to show the login page. Default is /login.
+		- PATH_BASE - Set all the path above relattive to this path base. Usefull for running behind a dumb load balancer which does not
+		  support path rewrite; for eg. Tanzu AVI LB.
+		  
+		  Better not to overlap the above three variables. Easiest way is to use relative to the current working dir for WEB_ROOT and 
+		  PUBLIC_ROOT (if needed). If the app is behind loadbalancer with extra path eg. '/my-ingress-path' then set PATH_BASE=/my-ingress-path		  
 
 		- PORT - http port to listen. Default 8080.
 		- AUTH_TYPE - default is jwt-cookie. Can be:
@@ -191,6 +208,7 @@ func main() {
 		    - QUERY_PARAM_KEY - The parameter key. Default is 'access_token'; that is the url is like https://<domain>/path?access_token=<jwt-token-string>
 		  - 'auto' - This will try to get token from session cookie and if not then read from the query param. When it is validated a new session cookie 
 		    will be set.
+		  - 'bypass' - This will disable authentication totally
 
 		- SESSION_LIFE_TIME - the lifetime of the session cookie. Default is 1h (that is 1 hour)
 		- SECURE_COOKIE - set the secure property of the session cookie. Default is true. Set to false if you are testing and not using https
@@ -221,6 +239,11 @@ func main() {
 		rsaPubKey = pubInterface.(*rsa.PublicKey)
 	}
 
+	loginPath = os.Getenv("LOGIN_PATH")
+	if loginPath == "" {
+		loginPath = "/login"
+	}
+
 	cookieName = os.Getenv("SESSION_COOKIE_NAME")
 	if cookieName == "" {
 		cookieName = "statis_web_srv_session"
@@ -245,11 +268,17 @@ func main() {
 	if authType == "" {
 		authType = "jwt-cookie"
 	}
+	if authType == "bypass" {
+		fmt.Fprintf(os.Stderr, "[WARN] AUTH_TYPE is bypass - we are not going to check auth\n")
+	}
 
 	queryParamKey = os.Getenv("QUERY_PARAM_KEY")
 	if queryParamKey == "" {
 		queryParamKey = "access_token"
 	}
+
+	// Path Base when dealing with LB without teh re-write feature like Tanzu AVI (yuk)
+	pathBase = os.Getenv("PATH_BASE")
 
 	// Static file server
 	webRoot = os.Getenv("WEB_ROOT")
@@ -263,6 +292,10 @@ func main() {
 		publicRoot = *publicDir
 	}
 
+	// As app can be behind complex proxies and parsing these sometime not reliable. So provide this for crafting the loginURL
+	// Should be in the format http(s)://<hostname>:<port>. If empty then it tries to auto parse but it wont work behind proxy
+	externalDomain := os.Getenv("EXTERNAL_DOMAIN")
+
 	sessionLifeTimeStr := os.Getenv("SESSION_LIFE_TIME")
 	if sessionLifeTimeStr == "" {
 		sessionLifeTimeStr = "1h"
@@ -270,14 +303,29 @@ func main() {
 	cookieLastDuration, _ = time.ParseDuration(sessionLifeTimeStr)
 
 	router := gin.Default()
-	router.Any("/login", loginPageHandler)
+
+	var rPrivate, rPublic, rBase *gin.RouterGroup
+
+	rBase = router.Group(pathBase)
+	rPublic = rBase.Group(publicRoot)
+	rPrivate = rBase.Group(webRoot, AuthenticateMidleware())
+	if pathBase != "" {
+		cookiePath = pathBase + strings.TrimPrefix(webRoot, ".")
+	} else {
+		cookiePath = strings.TrimPrefix(webRoot, ".")
+	}
+
 	if publicRoot != "" {
-		fmt.Fprintf(os.Stderr, "[INFO] Public root: %s\n", publicRoot)
-		rPublic := router.Group(publicRoot)
 		rPublic.StaticFS("/", http.Dir(publicRoot))
 	}
-	rPrivate := router.Group(webRoot, AuthenticateMidleware())
 	rPrivate.StaticFS("/", http.Dir(webRoot))
+
+	rBase.Any(loginPath, loginPageHandler)
+	if externalDomain != "" {
+		loginURL = externalDomain + pathBase + loginPath
+	}
+
+	fmt.Fprintf(os.Stderr, "[INFO] Public root: %s\n", publicRoot)
 
 	fmt.Fprintf(os.Stderr, "Signing method %s\n", signingMethod)
 	fmt.Fprintf(os.Stderr, "Server is running on port %s\n", listenPort)
