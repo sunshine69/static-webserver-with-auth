@@ -176,11 +176,11 @@ func main() {
 		"RS256": jwt.WithValidMethods([]string{jwt.SigningMethodRS256.Name}),
 	}
 	// Command-line arguments
-	staticDir := flag.String("web-root", "./static", "Directory to serve static files from")
-	publicDir := flag.String("public-root", "", "Public Directory to serve static files from")
+	staticDir := flag.String("web-root", "./Private", "Directory to serve static files from")
+	publicDir := flag.String("public-root", "", "Public Directory to serve static files from. Optional")
 	port := flag.String("port", "8080", "Port to listen on")
 	flag.StringVar(&signingMethod, "jwt-sign", "HS256", "JWT Signing method. Value can be HS256 (HMAC using SHA256) or RS256 (RSA using SHA256)")
-	rsaPubKeyPath := flag.String("rsa-public-key", "", "RSA public key used when signing method is RS256")
+	rsaPubKeyPath := flag.String("rsa-public-key", "", "File path - RSA public key used when signing method is RS256")
 
 	flag.Usage = func() {
 		flag.PrintDefaults()
@@ -195,8 +195,11 @@ func main() {
 		- PUBLIC_ROOT - The non protected directory path to serve files from. Can be relative path to the current dir, or absolute path.
 		  Override the option '-public-root'	  
 		- LOGIN_PATH - the url path to show the login page. Default is /login.
+		- PATH_BASE - Set all the path above relattive to this path base. Usefull for running behind a dumb load balancer which does not
+		  support path rewrite; for eg. Tanzu AVI LB.
 		  
-		  Better not to overlap the above three variables
+		  Better not to overlap the above three variables. Easiest way is to use relative to the current working dir for WEB_ROOT and 
+		  PUBLIC_ROOT (if needed). If the app is behind loadbalancer with extra path eg. '/my-ingress-path' then set PATH_BASE=/my-ingress-path		  
 
 		- PORT - http port to listen. Default 8080.
 		- AUTH_TYPE - default is jwt-cookie. Can be:

@@ -13,7 +13,7 @@ ARG APP_VERSION="v0.1"
 ARG BINARY_NAME="static-webserver-with-auth"
 ARG PORT="8080"
 
-RUN go build -trimpath -ldflags="-X main.version=${APP_VERSION} -extldflags=-static -w -s" --tags "osusergo,netgo,sqlite_stat4,sqlite_foreign_keys,sqlite_json" -o ${BINARY_NAME}
+RUN go build -trimpath -ldflags="-X main.version=${APP_VERSION} -extldflags=-static -w -s" --tags "jsoniter,osusergo,netgo,sqlite_stat4,sqlite_foreign_keys,sqlite_json" -o ${BINARY_NAME}
 CMD ["/app/static-webserver-with-auth"]
 
 FROM scratch
