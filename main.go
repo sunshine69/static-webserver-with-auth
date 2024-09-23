@@ -81,6 +81,7 @@ func AuthenticateMidleware() gin.HandlerFunc {
 			}
 		case "bypass":
 			c.Next()
+			return
 		}
 
 		claims := &Claims{}
@@ -263,6 +264,9 @@ func main() {
 	authType = os.Getenv("AUTH_TYPE") // jwt-cookie, jwt-query-param
 	if authType == "" {
 		authType = "jwt-cookie"
+	}
+	if authType == "bypass" {
+		fmt.Fprintf(os.Stderr, "[WARN] AUTH_TYPE is bypass - we are not going to check auth\n")
 	}
 
 	queryParamKey = os.Getenv("QUERY_PARAM_KEY")
