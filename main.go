@@ -34,7 +34,7 @@ func loginPageHandler(c *gin.Context) {
 			return
 		}
 		// Token is valid, set a session cookie
-		c.SetCookie(cookieName, token, int(cookieLastDuration.Seconds()), "/", "", secureCookie, true)
+		c.SetCookie(cookieName, token, int(cookieLastDuration.Seconds()), cookiePath, "", secureCookie, true)
 
 		// Redirect to the home page or protected resource
 		c.Redirect(http.StatusFound, strings.ReplaceAll(pathBase+webRoot, ".", ""))
@@ -97,7 +97,7 @@ func AuthenticateMidleware() gin.HandlerFunc {
 		// 	fmt.Println(err)
 		// }
 		// Token is valid, set a session cookie
-		c.SetCookie(cookieName, token, int(cookieLastDuration.Seconds()), "/", "", secureCookie, true)
+		c.SetCookie(cookieName, token, int(cookieLastDuration.Seconds()), cookiePath, "", secureCookie, true)
 		// Token is valid, continue to the requested resource
 		c.Next()
 	}
@@ -129,13 +129,13 @@ type Claims struct {
 }
 
 var (
-	jwtSecret                           []byte
-	signingMethod                       string
-	rsaPubKey                           *rsa.PublicKey
-	jwtParserOptionsLookup              map[string]jwt.ParserOption
-	cookieName, authType, queryParamKey string
-	secureCookie                        bool
-	cookieLastDuration                  time.Duration
+	jwtSecret                                       []byte
+	signingMethod                                   string
+	rsaPubKey                                       *rsa.PublicKey
+	jwtParserOptionsLookup                          map[string]jwt.ParserOption
+	cookieName, cookiePath, authType, queryParamKey string
+	secureCookie                                    bool
+	cookieLastDuration                              time.Duration
 
 	// Path to the web root dir. This will be relative path to the current root; like ./static. The route path will be absolute like /static
 	// and then be stripped off. This can be an absolute path though started with / but the route will be the same exactly absolute path
@@ -302,6 +302,11 @@ func main() {
 	rBase = router.Group(pathBase)
 	rPublic = rBase.Group(publicRoot)
 	rPrivate = rBase.Group(webRoot, AuthenticateMidleware())
+	if pathBase != "" {
+		cookiePath = pathBase + strings.TrimPrefix(webRoot, ".")
+	} else {
+		cookiePath = strings.TrimPrefix(webRoot, ".")
+	}
 
 	if publicRoot != "" {
 		rPublic.StaticFS("/", http.Dir(publicRoot))
