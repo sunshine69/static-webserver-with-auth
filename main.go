@@ -22,7 +22,7 @@ import (
 func loginPageHandler(c *gin.Context) {
 	switch c.Request.Method {
 	case http.MethodGet:
-		loginTemplate.Execute(c.Writer, gin.H{"login_path": loginPath})
+		loginTemplate.Execute(c.Writer, gin.H{"login_path": pathBase + loginPath})
 	case http.MethodPost:
 		token, _ := c.GetPostForm("token")
 		claims := &Claims{}
@@ -37,7 +37,7 @@ func loginPageHandler(c *gin.Context) {
 		c.SetCookie(cookieName, token, int(cookieLastDuration.Seconds()), "/", "", secureCookie, true)
 
 		// Redirect to the home page or protected resource
-		c.Redirect(http.StatusFound, strings.TrimPrefix(webRoot, "."))
+		c.Redirect(http.StatusFound, strings.ReplaceAll(pathBase+webRoot, ".", ""))
 		return
 	}
 }
@@ -47,9 +47,17 @@ func AuthenticateMidleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var token string
 		var err error
+		if loginURL == "" { //Trying to parse but it wont work if it is behind complex proxy
+			scheme := "http"
+			if c.Request.TLS != nil {
+				scheme = "https"
+			}
+			loginURL = scheme + "://" + c.Request.Host + pathBase + loginPath
+			fmt.Fprintf(os.Stderr, "[WARN] EXTERNAL_DOMAIN not provided - we assume the loginURL is %s\n", loginURL)
+		}
 		redirect := func(c *gin.Context) {
 			// Redirect to login if all hopes lost
-			c.Redirect(http.StatusFound, loginPath)
+			c.Redirect(http.StatusMovedPermanently, loginURL)
 			c.Abort()
 		}
 		switch authType {
@@ -104,6 +112,7 @@ var loginTemplate = template.Must(template.New("login").Parse(`
 </head>
 <body>
     <h2>Login with JWT</h2>	
+	<p>You reach here because whether you do not have the token or the token is expired. Please go back to the previous application to re-generate new link with new token or get the token by other means and paste it here</p>
     <form method="POST" action="{{ .login_path }}">
         <label for="token">JWT Token:</label>
         <input type="text" id="token" name="token" required>
@@ -134,6 +143,8 @@ var (
 	webRoot    string
 	publicRoot string
 	loginPath  string
+	pathBase   string
+	loginURL   string
 )
 
 // Parse the jwt token. If you want to customise the auth, change it in here. This function is used in the middleware and in login handler
@@ -259,6 +270,9 @@ func main() {
 		queryParamKey = "access_token"
 	}
 
+	// Path Base when dealing with LB without teh re-write feature like Tanzu AVI (yuk)
+	pathBase = os.Getenv("PATH_BASE")
+
 	// Static file server
 	webRoot = os.Getenv("WEB_ROOT")
 	if webRoot == "" {
@@ -271,6 +285,10 @@ func main() {
 		publicRoot = *publicDir
 	}
 
+	// As app can be behind complex proxies and parsing these sometime not reliable. So provide this for crafting the loginURL
+	// Should be in the format http(s)://<hostname>:<port>. If empty then it tries to auto parse but it wont work behind proxy
+	externalDomain := os.Getenv("EXTERNAL_DOMAIN")
+
 	sessionLifeTimeStr := os.Getenv("SESSION_LIFE_TIME")
 	if sessionLifeTimeStr == "" {
 		sessionLifeTimeStr = "1h"
@@ -278,14 +296,24 @@ func main() {
 	cookieLastDuration, _ = time.ParseDuration(sessionLifeTimeStr)
 
 	router := gin.Default()
-	router.Any(loginPath, loginPageHandler)
+
+	var rPrivate, rPublic, rBase *gin.RouterGroup
+
+	rBase = router.Group(pathBase)
+	rPublic = rBase.Group(publicRoot)
+	rPrivate = rBase.Group(webRoot, AuthenticateMidleware())
+
 	if publicRoot != "" {
-		fmt.Fprintf(os.Stderr, "[INFO] Public root: %s\n", publicRoot)
-		rPublic := router.Group(publicRoot)
 		rPublic.StaticFS("/", http.Dir(publicRoot))
 	}
-	rPrivate := router.Group(webRoot, AuthenticateMidleware())
 	rPrivate.StaticFS("/", http.Dir(webRoot))
+
+	rBase.Any(loginPath, loginPageHandler)
+	if externalDomain != "" {
+		loginURL = externalDomain + pathBase + loginPath
+	}
+
+	fmt.Fprintf(os.Stderr, "[INFO] Public root: %s\n", publicRoot)
 
 	fmt.Fprintf(os.Stderr, "Signing method %s\n", signingMethod)
 	fmt.Fprintf(os.Stderr, "Server is running on port %s\n", listenPort)
