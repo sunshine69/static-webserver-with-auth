@@ -42,13 +42,13 @@ var loginTemplate = template.Must(template.New("login").Parse(`
 `))
 
 var (
-	jwtSecret                                       []byte
-	signingMethod                                   string
-	rsaPubKey                                       *rsa.PublicKey
-	jwtParserOptionsLookup                          map[string]jwt.ParserOption
-	cookieName, cookiePath, authType, queryParamKey string
-	secureCookie                                    bool
-	cookieLastDuration                              time.Duration
+	jwtSecret                           []byte
+	signingMethod                       string
+	rsaPubKey                           *rsa.PublicKey
+	jwtParserOptionsLookup              map[string]jwt.ParserOption
+	cookieName, authType, queryParamKey string
+	secureCookie                        bool
+	cookieLastDuration                  time.Duration
 
 	// Path to the web root dir. This will be relative path to the current root; like ./static. The route path will be absolute like /static
 	// and then be stripped off. This can be an absolute path though started with / but the route will be the same exactly absolute path
@@ -83,10 +83,11 @@ func ParseJWTToken(token string, claims *Claims) (parsedToken *jwt.Token, err er
 }
 
 // Handler for the login page
-func loginPageHandler(w http.ResponseWriter, r *http.Request, jwtSecret []byte) {
-	if r.Method == http.MethodGet {
+func loginPageHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
 		loginTemplate.Execute(w, map[string]interface{}{"loginPath": loginPath})
-	} else if r.Method == http.MethodPost {
+	case http.MethodPost:
 		token := r.FormValue("token")
 		claims := &Claims{}
 
@@ -115,7 +116,7 @@ func loginPageHandler(w http.ResponseWriter, r *http.Request, jwtSecret []byte) 
 }
 
 // Middleware to check JWT in cookies
-func authenticate(next http.Handler, jwtSecret []byte) http.Handler {
+func authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var token string
 		switch authType {
@@ -328,9 +329,9 @@ func main() {
 	mux := http.NewServeMux()
 
 	// Routes
-	mux.Handle(privateRoutePath, http.StripPrefix(stripPrefixPrivate, authenticate(http.FileServer(http.Dir(webRoot)), []byte(jwtSecret))))
+	mux.Handle(privateRoutePath, http.StripPrefix(stripPrefixPrivate, authenticate(http.FileServer(http.Dir(webRoot)))))
 	mux.Handle(loginPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		loginPageHandler(w, r, []byte(jwtSecret))
+		loginPageHandler(w, r)
 	}))
 	if publicRoot != "" {
 		mux.Handle(publicRoutePath, http.StripPrefix(stripPrefixPublic, http.FileServer(http.Dir(publicRoot))))
