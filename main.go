@@ -232,11 +232,11 @@ func main() {
 			panic("[ERROR] can not read RSA Public Key content. Check your public key\n")
 		}
 		spkiBlock, _ := pem.Decode(rsaPubKeyBt)
-		pubInterface, err := x509.ParsePKIXPublicKey(spkiBlock.Bytes)
+		pubInterface, err := x509.ParseCertificate(spkiBlock.Bytes)
 		if err != nil {
-			panic("[ERROR] x509.ParsePKIXPublicKey " + err.Error())
+			panic("[ERROR] x509.ParseCertificate " + err.Error())
 		}
-		rsaPubKey = pubInterface.(*rsa.PublicKey)
+		rsaPubKey = pubInterface.PublicKey.(*rsa.PublicKey)
 	}
 
 	loginPath = os.Getenv("LOGIN_PATH")
