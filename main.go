@@ -62,19 +62,24 @@ var (
 	pathBase                                                                 string
 	loginURL                                                                 string
 	privateRoutePath, publicRoutePath, stripPrefixPrivate, stripPrefixPublic string
+	DEBUG                                                                    bool
 )
 
 // getIP returns the ip address from the http request
 func getIP(r *http.Request) (string, error) {
 	IPAddress := r.Header.Get("X-Real-Ip")
-	fmt.Fprintf(os.Stderr, "[DEBUG] X-Real-Ip '%s'\n", IPAddress)
+	if DEBUG {
+		fmt.Fprintf(os.Stderr, "[DEBUG] X-Real-Ip '%s'\n", IPAddress)
+	}
 	if IPAddress != "" {
 		return IPAddress, nil
 	}
 
 	ips := r.Header.Get("X-Forwarded-For")
 	splitIps := strings.Split(ips, ",")
-	fmt.Fprintln(os.Stderr, "[DEBUG] X-Forwarded-For ", splitIps)
+	if DEBUG {
+		fmt.Fprintln(os.Stderr, "[DEBUG] X-Forwarded-For ", splitIps)
+	}
 
 	if len(splitIps) > 0 {
 		// get last IP in list since ELB prepends other user defined IPs, meaning the last one is the actual client IP.
@@ -191,6 +196,11 @@ func checkIP(next http.Handler) http.Handler {
 // Middleware to check JWT in cookies
 func authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if DEBUG {
+			if ip, err := getIP(r); err == nil {
+				fmt.Fprintf(os.Stderr, "[DEBUG] request IP '%s'\n", ip)
+			}
+		}
 		var token string
 		switch authType {
 		case "jwt-cookie":
@@ -288,6 +298,8 @@ func main() {
 		`)
 	}
 	flag.Parse()
+
+	DEBUG = os.Getenv("DEBUG") != ""
 
 	switch signingMethod {
 	case "HS256":
