@@ -4,12 +4,15 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"flag"
 	"fmt"
 	"html/template"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -60,6 +63,42 @@ var (
 	loginURL                                                                 string
 	privateRoutePath, publicRoutePath, stripPrefixPrivate, stripPrefixPublic string
 )
+
+// getIP returns the ip address from the http request
+func getIP(r *http.Request) (string, error) {
+	IPAddress := r.Header.Get("X-Real-Ip")
+	fmt.Fprintf(os.Stderr, "[DEBUG] X-Real-Ip '%s'\n", IPAddress)
+	if IPAddress != "" {
+		return IPAddress, nil
+	}
+
+	ips := r.Header.Get("X-Forwarded-For")
+	splitIps := strings.Split(ips, ",")
+	fmt.Fprintln(os.Stderr, "[DEBUG] X-Forwarded-For ", splitIps)
+
+	if len(splitIps) > 0 {
+		// get last IP in list since ELB prepends other user defined IPs, meaning the last one is the actual client IP.
+		netIP := net.ParseIP(splitIps[len(splitIps)-1])
+		if netIP != nil {
+			return netIP.String(), nil
+		}
+	}
+
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return "", err
+	}
+
+	netIP := net.ParseIP(ip)
+	if netIP != nil {
+		ip := netIP.String()
+		if ip == "::1" {
+			return "127.0.0.1", nil
+		}
+		return ip, nil
+	}
+	return "", errors.New("IP not found")
+}
 
 func ParseJWTToken(token string, claims *Claims) (parsedToken *jwt.Token, err error) {
 	switch signingMethod {
@@ -113,6 +152,40 @@ func loginPageHandler(w http.ResponseWriter, r *http.Request) {
 		// Redirect to the home page or protected resource
 		http.Redirect(w, r, privateRoutePath, http.StatusFound)
 	}
+}
+
+func checkIP(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ipaddr, err := getIP(r)
+		if err != nil || ipaddr == "" {
+			fmt.Fprintf(os.Stderr, "[ERROR] you enabled IP ACL but got error - %s\nValue of ipaddr: '%s'\n", err.Error(), ipaddr)
+			panic("")
+		}
+		whitelist := os.Getenv("ALLOWED_NETWORKS")
+
+		listNetwork := strings.Split(whitelist, ",")
+		portPtn := regexp.MustCompile(`\:[\d]+$`)
+		host := portPtn.ReplaceAllString(ipaddr, "")
+		ipA := net.ParseIP(host)
+		if len(listNetwork) == 0 {
+			panic("[ERROR] you enabled IP ACL but did not set env var ALLOWED_NETWORKS or it is not in coma separated format")
+		}
+		for _, nwStr := range listNetwork {
+			nwStr = strings.TrimSpace(nwStr)
+			_, netB, err := net.ParseCIDR(nwStr)
+			if err != nil {
+				panic("[ERROR] you enabled IP ACL but got error ParseCIDR - " + err.Error())
+			}
+			if (netB != nil) && netB.Contains(ipA) {
+				next.ServeHTTP(w, r)
+				return
+			} else {
+				http.Error(w, "Permission denied", http.StatusForbidden)
+				return
+			}
+		}
+		http.Error(w, "Permission denied", http.StatusForbidden)
+	})
 }
 
 // Middleware to check JWT in cookies
@@ -328,12 +401,23 @@ func main() {
 	mux := http.NewServeMux()
 
 	// Routes
-	mux.Handle(privateRoutePath, http.StripPrefix(stripPrefixPrivate, authenticate(http.FileServer(http.Dir(webRoot)))))
-	mux.Handle(loginPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		loginPageHandler(w, r)
-	}))
-	if publicRoot != "" {
-		mux.Handle(publicRoutePath, http.StripPrefix(stripPrefixPublic, http.FileServer(http.Dir(publicRoot))))
+	allowedNetworks := os.Getenv("ALLOWED_NETWORKS")
+	if allowedNetworks != "" {
+		mux.Handle(privateRoutePath, http.StripPrefix(stripPrefixPrivate, checkIP(authenticate(http.FileServer(http.Dir(webRoot))))))
+		mux.Handle(loginPath, checkIP(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			loginPageHandler(w, r)
+		})))
+		if publicRoot != "" {
+			mux.Handle(publicRoutePath, http.StripPrefix(stripPrefixPublic, checkIP(http.FileServer(http.Dir(publicRoot)))))
+		}
+	} else {
+		mux.Handle(privateRoutePath, http.StripPrefix(stripPrefixPrivate, authenticate(http.FileServer(http.Dir(webRoot)))))
+		mux.Handle(loginPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			loginPageHandler(w, r)
+		}))
+		if publicRoot != "" {
+			mux.Handle(publicRoutePath, http.StripPrefix(stripPrefixPublic, http.FileServer(http.Dir(publicRoot))))
+		}
 	}
 
 	fmt.Printf("Server is running on port %s\n", listenPort)
