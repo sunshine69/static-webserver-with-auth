@@ -187,21 +187,36 @@ func main() {
 		fmt.Println(`
 							***** static web server with jwt auth *****
 		This web server serves static files and protected with jwt auth. Apart from command flags the env vars below will override it
+
 		- JWT_SECRET - The secret to validate the jwt token
+		- JWT_SIGN - override option --jwt-sign with same value.
+		- RSA_PUBLIC_KEY - override option --rsa-public-key
 		- SESSION_COOKIE_NAME - the session cookie name used to get the jwt token. Default is statis_web_srv_session
 
-		- WEB_ROOT - The protected directory path to serve files from. Can be relative path to the current dir, or absolute path. Pay attention to extra slashes for WEB_ROOT and PUBLIC_ROOT.
-		  The html path will be the same without dot if it is relative. Override cmd flag '-web-root'
+		- WEB_ROOT - The protected directory path to serve files from. Can be relative path to the current working dir, or absolute path.
+		  Pay attention to extra slashes for WEB_ROOT and PUBLIC_ROOT.
+		  The html path will be the same without dot if it is relative. Override cmd flag '-web-root'.
+
 		- PUBLIC_ROOT - The non protected directory path to serve files from. Can be relative path to the current dir, or absolute path.
+
+		  Both WEB_ROOT and PUBLIC_ROOT, If it is absolute path then in the URL you need to supply the full directory path from the current working directory.
+		  Remember to include PATH_BASE as well if it is set however there is no need to have a directory with the value of PATH_BASE, it is purely for
+		  dealing with dumb LB.
+
 		  Override the option '-public-root'
-		- LOGIN_PATH - the url path to show the login page. Default is /login.
+
+		- LOGIN_PATH - the url path to show the login page. Default is /login. Set it to empty to take the <PATH_BASSE>/login. When authentication failed
+		  the app will re-direct to this path and show the simple login page.
+
 		- PATH_BASE - Set all the path above relattive to this path base. Usefull for running behind a dumb load balancer which does not
-		  support path rewrite; for eg. Tanzu AVI LB.
+		  support path rewrite; for eg. Tanzu AVI LB. If not required, set to empty string.
 
 		  Better not to overlap the above three variables. Easiest way is to use relative to the current working dir for WEB_ROOT and
 		  PUBLIC_ROOT (if needed). If the app is behind loadbalancer with extra path eg. '/my-ingress-path' then set PATH_BASE=/my-ingress-path
+		  If the current working dir is the webroot itself set WEB_ROOT="" (empty string)
 
 		- PORT - http port to listen. Default 8080.
+
 		- AUTH_TYPE - default is jwt-cookie. Can be:
 		  - 'jwt-cookie' - store and get the jwt token from session cookie
 		  - 'jwt-query-param' - Get the jwt from query parameter. In this case need to provide a env var. Also there is no login helper for this case.
@@ -216,6 +231,12 @@ func main() {
 	}
 	flag.Parse()
 
+	if method := os.Getenv("JWT_SIGN"); method != "" {
+		signingMethod = method
+	}
+	if rsapubkey := os.Getenv("RSA_PUBLIC_KEY"); rsapubkey != "" {
+		*rsaPubKeyPath = rsapubkey
+	}
 	switch signingMethod {
 	case "HS256":
 		jwtSecretStr := os.Getenv("JWT_SECRET")
