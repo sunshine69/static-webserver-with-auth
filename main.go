@@ -4,15 +4,12 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
-	"errors"
 	"flag"
 	"fmt"
 	"html/template"
 	"log"
-	"net"
 	"net/http"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -62,48 +59,7 @@ var (
 	pathBase                                                                 string
 	loginURL                                                                 string
 	privateRoutePath, publicRoutePath, stripPrefixPrivate, stripPrefixPublic string
-	DEBUG                                                                    bool
 )
-
-// getIP returns the ip address from the http request
-func getIP(r *http.Request) (string, error) {
-	IPAddress := r.Header.Get("X-Real-Ip")
-	if DEBUG {
-		fmt.Fprintf(os.Stderr, "[DEBUG] X-Real-Ip '%s'\n", IPAddress)
-	}
-	if IPAddress != "" {
-		return IPAddress, nil
-	}
-
-	ips := r.Header.Get("X-Forwarded-For")
-	splitIps := strings.Split(ips, ",")
-	if DEBUG {
-		fmt.Fprintln(os.Stderr, "[DEBUG] X-Forwarded-For ", splitIps)
-	}
-
-	if len(splitIps) > 0 {
-		// get last IP in list since ELB prepends other user defined IPs, meaning the last one is the actual client IP.
-		netIP := net.ParseIP(splitIps[len(splitIps)-1])
-		if netIP != nil {
-			return netIP.String(), nil
-		}
-	}
-
-	ip, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return "", err
-	}
-
-	netIP := net.ParseIP(ip)
-	if netIP != nil {
-		ip := netIP.String()
-		if ip == "::1" {
-			return "127.0.0.1", nil
-		}
-		return ip, nil
-	}
-	return "", errors.New("IP not found")
-}
 
 func ParseJWTToken(token string, claims *Claims) (parsedToken *jwt.Token, err error) {
 	switch signingMethod {
@@ -159,48 +115,9 @@ func loginPageHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func checkIP(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ipaddr, err := getIP(r)
-		if err != nil || ipaddr == "" {
-			fmt.Fprintf(os.Stderr, "[ERROR] you enabled IP ACL but got error - %s\nValue of ipaddr: '%s'\n", err.Error(), ipaddr)
-			panic("")
-		}
-		whitelist := os.Getenv("ALLOWED_NETWORKS")
-
-		listNetwork := strings.Split(whitelist, ",")
-		portPtn := regexp.MustCompile(`\:[\d]+$`)
-		host := portPtn.ReplaceAllString(ipaddr, "")
-		ipA := net.ParseIP(host)
-		if len(listNetwork) == 0 {
-			panic("[ERROR] you enabled IP ACL but did not set env var ALLOWED_NETWORKS or it is not in coma separated format")
-		}
-		for _, nwStr := range listNetwork {
-			nwStr = strings.TrimSpace(nwStr)
-			_, netB, err := net.ParseCIDR(nwStr)
-			if err != nil {
-				panic("[ERROR] you enabled IP ACL but got error ParseCIDR - " + err.Error())
-			}
-			if (netB != nil) && netB.Contains(ipA) {
-				next.ServeHTTP(w, r)
-				return
-			} else {
-				http.Error(w, "Permission denied", http.StatusForbidden)
-				return
-			}
-		}
-		http.Error(w, "Permission denied", http.StatusForbidden)
-	})
-}
-
 // Middleware to check JWT in cookies
 func authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if DEBUG {
-			if ip, err := getIP(r); err == nil {
-				fmt.Fprintf(os.Stderr, "[DEBUG] request IP '%s'\n", ip)
-			}
-		}
 		var token string
 		switch authType {
 		case "jwt-cookie":
@@ -259,8 +176,8 @@ func main() {
 		"RS256": jwt.WithValidMethods([]string{jwt.SigningMethodRS256.Name}),
 	}
 	// Command-line arguments
-	staticDir := flag.String("web-root", "", "Directory to serve static files from")
-	publicDir := flag.String("public-root", "", "Public Directory to serve static files from. Optional")
+	staticDir := flag.String("web-root", "./Private", "Directory to serve static files from")
+	publicDir := flag.String("public-root", "./Public", "Public Directory to serve static files from. Optional")
 	port := flag.String("port", "8080", "Port to listen on")
 	flag.StringVar(&signingMethod, "jwt-sign", "HS256", "JWT Signing method. Value can be HS256 (HMAC using SHA256) or RS256 (RSA using SHA256)")
 	rsaPubKeyPath := flag.String("rsa-public-key", "", "File path - RSA public key used when signing method is RS256")
@@ -270,21 +187,36 @@ func main() {
 		fmt.Println(`
 							***** static web server with jwt auth *****
 		This web server serves static files and protected with jwt auth. Apart from command flags the env vars below will override it
+
 		- JWT_SECRET - The secret to validate the jwt token
+		- JWT_SIGN - override option --jwt-sign with same value.
+		- RSA_PUBLIC_KEY - override option --rsa-public-key
 		- SESSION_COOKIE_NAME - the session cookie name used to get the jwt token. Default is statis_web_srv_session
 
-		- WEB_ROOT - The protected directory path to serve files from. Can be relative path to the current dir, or absolute path. Pay attention to extra slashes for WEB_ROOT and PUBLIC_ROOT.
-		  The html path will be the same without dot if it is relative. Override cmd flag '-web-root'
+		- WEB_ROOT - The protected directory path to serve files from. Can be relative path to the current working dir, or absolute path.
+		  Pay attention to extra slashes for WEB_ROOT and PUBLIC_ROOT.
+		  The html path will be the same without dot if it is relative. Override cmd flag '-web-root'.
+
 		- PUBLIC_ROOT - The non protected directory path to serve files from. Can be relative path to the current dir, or absolute path.
+
+		  Both WEB_ROOT and PUBLIC_ROOT, If it is absolute path then in the URL you need to supply the full directory path from the current working directory.
+		  Remember to include PATH_BASE as well if it is set however there is no need to have a directory with the value of PATH_BASE, it is purely for
+		  dealing with dumb LB.
+
 		  Override the option '-public-root'
-		- LOGIN_PATH - the url path to show the login page. Default is /login.
+
+		- LOGIN_PATH - the url path to show the login page. Default is /login. Set it to empty to take the <PATH_BASSE>/login. When authentication failed
+		  the app will re-direct to this path and show the simple login page.
+
 		- PATH_BASE - Set all the path above relattive to this path base. Usefull for running behind a dumb load balancer which does not
-		  support path rewrite; for eg. Tanzu AVI LB.
+		  support path rewrite; for eg. Tanzu AVI LB. If not required, set to empty string.
 
 		  Better not to overlap the above three variables. Easiest way is to use relative to the current working dir for WEB_ROOT and
 		  PUBLIC_ROOT (if needed). If the app is behind loadbalancer with extra path eg. '/my-ingress-path' then set PATH_BASE=/my-ingress-path
+		  If the current working dir is the webroot itself set WEB_ROOT="" (empty string)
 
 		- PORT - http port to listen. Default 8080.
+
 		- AUTH_TYPE - default is jwt-cookie. Can be:
 		  - 'jwt-cookie' - store and get the jwt token from session cookie
 		  - 'jwt-query-param' - Get the jwt from query parameter. In this case need to provide a env var. Also there is no login helper for this case.
@@ -299,8 +231,12 @@ func main() {
 	}
 	flag.Parse()
 
-	DEBUG = os.Getenv("DEBUG") != ""
-
+	if method := os.Getenv("JWT_SIGN"); method != "" {
+		signingMethod = method
+	}
+	if rsapubkey := os.Getenv("RSA_PUBLIC_KEY"); rsapubkey != "" {
+		*rsaPubKeyPath = rsapubkey
+	}
 	switch signingMethod {
 	case "HS256":
 		jwtSecretStr := os.Getenv("JWT_SECRET")
@@ -413,23 +349,12 @@ func main() {
 	mux := http.NewServeMux()
 
 	// Routes
-	allowedNetworks := os.Getenv("ALLOWED_NETWORKS")
-	if allowedNetworks != "" {
-		mux.Handle(privateRoutePath, http.StripPrefix(stripPrefixPrivate, checkIP(authenticate(http.FileServer(http.Dir(webRoot))))))
-		mux.Handle(loginPath, checkIP(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			loginPageHandler(w, r)
-		})))
-		if publicRoot != "" {
-			mux.Handle(publicRoutePath, http.StripPrefix(stripPrefixPublic, checkIP(http.FileServer(http.Dir(publicRoot)))))
-		}
-	} else {
-		mux.Handle(privateRoutePath, http.StripPrefix(stripPrefixPrivate, authenticate(http.FileServer(http.Dir(webRoot)))))
-		mux.Handle(loginPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			loginPageHandler(w, r)
-		}))
-		if publicRoot != "" {
-			mux.Handle(publicRoutePath, http.StripPrefix(stripPrefixPublic, http.FileServer(http.Dir(publicRoot))))
-		}
+	mux.Handle(privateRoutePath, http.StripPrefix(stripPrefixPrivate, authenticate(http.FileServer(http.Dir(webRoot)))))
+	mux.Handle(loginPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		loginPageHandler(w, r)
+	}))
+	if publicRoot != "" {
+		mux.Handle(publicRoutePath, http.StripPrefix(stripPrefixPublic, http.FileServer(http.Dir(publicRoot))))
 	}
 
 	fmt.Printf("Server is running on port %s\n", listenPort)
