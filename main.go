@@ -176,8 +176,8 @@ func main() {
 		"RS256": jwt.WithValidMethods([]string{jwt.SigningMethodRS256.Name}),
 	}
 	// Command-line arguments
-	staticDir := flag.String("web-root", "./Private", "Directory to serve static files from")
-	publicDir := flag.String("public-root", "./Public", "Public Directory to serve static files from. Optional")
+	staticDir := flag.String("web-root", "", "Directory to serve static files from")
+	publicDir := flag.String("public-root", "", "Public Directory to serve static files from. Optional")
 	port := flag.String("port", "8080", "Port to listen on")
 	flag.StringVar(&signingMethod, "jwt-sign", "HS256", "JWT Signing method. Value can be HS256 (HMAC using SHA256) or RS256 (RSA using SHA256)")
 	rsaPubKeyPath := flag.String("rsa-public-key", "", "File path - RSA public key used when signing method is RS256")
