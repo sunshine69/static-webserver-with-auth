@@ -1,7 +1,17 @@
 This is a static web server with jwt authentication enabled to protect resources.
 
+The software is used for the techdoc project which requires only a static web server and implement simple way to authenticate users when required.
 
-Testing ...
+As of now only micro-gui techdoc might use it to serve US client but it is not in produdction yet.
+
+When officially setup for US (that is exposing to the internet) we might need to ask Security Team if it is nessesary to audit this code. 
+It should have the IP allowed list anyway when it happened.
+
+The code here is trying to be as much simple as possible and only using golang standard library which is of high quality standard and passed any security 
+auditing, maintained by Google Team.
+
+The only exception if teh jwt library but that library is also the defacto standard in golang when handling jwt stuff.
+
 
 Build
 
