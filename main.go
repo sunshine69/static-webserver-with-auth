@@ -41,7 +41,14 @@ var loginTemplate = template.Must(template.New("login").Parse(`
 </html>
 `))
 
+func printVersionBuildInfo() {
+	fmt.Printf("Version: %s\nBuild time: %s\n", version, buildTime)
+}
+
 var (
+	version   string // Will hold the version number
+	buildTime string // Will hold the build time
+
 	jwtSecret                           []byte
 	signingMethod                       string
 	rsaPubKey                           *rsa.PublicKey
@@ -230,6 +237,11 @@ func main() {
 		`)
 	}
 	flag.Parse()
+
+	if len(os.Args) > 1 && os.Args[1] == "version" {
+		printVersionBuildInfo()
+		os.Exit(0)
+	}
 
 	if method := os.Getenv("JWT_SIGN"); method != "" {
 		signingMethod = method
