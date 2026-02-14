@@ -163,15 +163,20 @@ func authenticate(next http.Handler) http.Handler {
 			return
 		}
 
-		// Token is valid, set a session cookie
-		http.SetCookie(w, &http.Cookie{
-			Name:     cookieName,
-			Value:    token, // Use the token as session token for simplicity
-			Expires:  time.Now().Add(cookieLastDuration),
-			HttpOnly: true,
-			Secure:   secureCookie,
-			Path:     privateRoutePath,
-		})
+		// Token is valid.
+		// Only set the session cookie if it does NOT already exist to avoid resetting expiry
+		cookie, cookieErr := r.Cookie(cookieName)
+		if cookieErr != nil || cookie.Expires.Before(time.Now()) {
+			http.SetCookie(w, &http.Cookie{
+				Name:     cookieName,
+				Value:    token, // Store the token from the request (URL or Cookie)
+				Expires:  time.Now().Add(cookieLastDuration),
+				HttpOnly: true,
+				Secure:   secureCookie,
+				Path:     privateRoutePath,
+			})
+		}
+
 		// Token is valid, continue to the requested resource
 		next.ServeHTTP(w, r)
 	})
