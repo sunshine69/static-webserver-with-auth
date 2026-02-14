@@ -64,7 +64,6 @@ var (
 	publicRoot                                                               string
 	loginPath                                                                string
 	pathBase                                                                 string
-	loginURL                                                                 string
 	privateRoutePath, publicRoutePath, stripPrefixPrivate, stripPrefixPublic string
 )
 
@@ -361,7 +360,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "[INFO] Filesystem - Current working directory: '%s'", cwd)
 	}
 	fmt.Fprintf(os.Stderr, " PATH_BASE: '%s' WEB_ROOT: '%s' PUBLIC_ROOT: '%s' LOGIN_PATH: '%s'\n", pathBase, webRoot, publicRoot, loginPath)
-	fmt.Fprintf(os.Stderr, "[INFO] URL Path - privateRoutePath: '%s' publicRoutePath: '%s' LOGIN_URL: '%s'\n", privateRoutePath, publicRoutePath, loginURL)
+	fmt.Fprintf(os.Stderr, "[INFO] URL Path - privateRoutePath: '%s' publicRoutePath: '%s' LOGIN_PATH: '%s'\n", privateRoutePath, publicRoutePath, loginPath)
 
 	mux := http.NewServeMux()
 
