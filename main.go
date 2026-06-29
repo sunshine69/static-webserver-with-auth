@@ -305,6 +305,8 @@ func main() {
 	if authType == "" {
 		authType = "jwt-cookie"
 	}
+
+	fmt.Println("[INFO] authType is " + authType)
 	if authType == "bypass" {
 		fmt.Fprintf(os.Stderr, "[WARN] AUTH_TYPE is bypass - we are not going to check auth\n")
 	}
