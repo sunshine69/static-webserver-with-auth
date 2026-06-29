@@ -92,7 +92,10 @@ func ParseJWTToken(token string, claims *Claims) (parsedToken *jwt.Token, err er
 func loginPageHandler(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		loginTemplate.Execute(w, map[string]interface{}{"loginPath": loginPath})
+		if err := loginTemplate.Execute(w, map[string]interface{}{"loginPath": loginPath}); err != nil {
+			log.Printf("[ERROR] loginTemplate.Execute: %v", err)
+			http.Error(w, "Internal server error rendering login page", http.StatusInternalServerError)
+		}
 	case http.MethodPost:
 		token := r.FormValue("token")
 		claims := &Claims{}
@@ -106,7 +109,6 @@ func loginPageHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Token is valid, set a session cookie
-
 		http.SetCookie(w, &http.Cookie{
 			Name:     cookieName,
 			Value:    token, // Use the token as session token for simplicity
@@ -121,15 +123,39 @@ func loginPageHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// detectMisplacedToken returns a 400 with a clear message when the caller
+// accidentally puts "access_token=<jwt>" in the URL path instead of as a
+// query parameter (e.g. /app/access_token=eyJ... instead of /app/?access_token=eyJ...).
+// Without this the file server either 404s or 500s depending on the token content,
+// giving the caller no useful signal about what went wrong.
+func detectMisplacedToken(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "access_token=") {
+			http.Error(w,
+				"Malformed URL: '"+queryParamKey+"' must be a query parameter, not part of the path.\n"+
+					"Use: "+r.URL.Path[:strings.Index(r.URL.Path, queryParamKey)-0]+"?"+queryParamKey+"=<token>",
+				http.StatusBadRequest)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // Middleware to check JWT in cookies
 func authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if authType == "bypass" {
+			// Log a per-request warning so accidental bypass deployments are visible in logs.
+			log.Printf("[WARN] AUTH_TYPE=bypass: serving %s unauthenticated", r.URL.Path)
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		var token string
 		switch authType {
 		case "jwt-cookie":
 			cookie, err := r.Cookie(cookieName)
 			if err != nil {
-				// Redirect to login if no session cookie
 				http.Redirect(w, r, loginPath, http.StatusFound)
 				return
 			}
@@ -144,31 +170,28 @@ func authenticate(next http.Handler) http.Handler {
 				token = cookie.Value
 			}
 			if token == "" {
-				// Redirect to login if all hopes lost
 				http.Redirect(w, r, loginPath, http.StatusFound)
 				return
 			}
-		case "bypass":
-			next.ServeHTTP(w, r)
-			return
 		}
 
 		claims := &Claims{}
 		parsedToken, err := ParseJWTToken(token, claims)
-
 		if err != nil || !parsedToken.Valid {
-			// Redirect to login if token is invalid
 			http.Redirect(w, r, loginPath, http.StatusFound)
 			return
 		}
 
 		// Token is valid.
-		// Only set the session cookie if it does NOT already exist to avoid resetting expiry
-		cookie, cookieErr := r.Cookie(cookieName)
-		if cookieErr != nil || cookie.Expires.Before(time.Now()) {
+		// Only set the session cookie when there isn't one already — we don't
+		// want to reset the expiry on every request. Note: browsers do not send
+		// Expires back in the Cookie header, so we cannot inspect cookie.Expires
+		// here; relying on the JWT's own expiry (enforced by ParseJWTToken) is
+		// sufficient.
+		if _, cookieErr := r.Cookie(cookieName); cookieErr != nil {
 			http.SetCookie(w, &http.Cookie{
 				Name:     cookieName,
-				Value:    token, // Store the token from the request (URL or Cookie)
+				Value:    token,
 				Expires:  time.Now().Add(cookieLastDuration),
 				HttpOnly: true,
 				Secure:   secureCookie,
@@ -176,16 +199,23 @@ func authenticate(next http.Handler) http.Handler {
 			})
 		}
 
-		// Token is valid, continue to the requested resource
 		next.ServeHTTP(w, r)
 	})
 }
 
 func main() {
-	jwtParserOptionsLookup = map[string]jwt.ParserOption{ // Add more options here if u want to support more than these
+	// Check for the version sub-command before flag.Parse so that unknown flags
+	// don't cause a spurious error when the user just wants version info.
+	if len(os.Args) > 1 && os.Args[1] == "version" {
+		printVersionBuildInfo()
+		os.Exit(0)
+	}
+
+	jwtParserOptionsLookup = map[string]jwt.ParserOption{
 		"HS256": jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Name}),
 		"RS256": jwt.WithValidMethods([]string{jwt.SigningMethodRS256.Name}),
 	}
+
 	// Command-line arguments
 	staticDir := flag.String("web-root", "", "Directory to serve static files from")
 	publicDir := flag.String("public-root", "", "Public Directory to serve static files from. Optional")
@@ -216,10 +246,10 @@ func main() {
 
 		  Override the option '-public-root'
 
-		- LOGIN_PATH - the url path to show the login page. Default is /login. Set it to empty to take the <PATH_BASSE>/login. When authentication failed
+		- LOGIN_PATH - the url path to show the login page. Default is /login. Set it to empty to take the <PATH_BASE>/login. When authentication failed
 		  the app will re-direct to this path and show the simple login page.
 
-		- PATH_BASE - Set all the path above relattive to this path base. Usefull for running behind a dumb load balancer which does not
+		- PATH_BASE - Set all the path above relative to this path base. Useful for running behind a dumb load balancer which does not
 		  support path rewrite; for eg. Tanzu AVI LB. If not required, set to empty string.
 
 		  Better not to overlap the above three variables. Easiest way is to use relative to the current working dir for WEB_ROOT and
@@ -242,11 +272,6 @@ func main() {
 	}
 	flag.Parse()
 
-	if len(os.Args) > 1 && os.Args[1] == "version" {
-		printVersionBuildInfo()
-		os.Exit(0)
-	}
-
 	if method := os.Getenv("JWT_SIGN"); method != "" {
 		signingMethod = method
 	}
@@ -262,18 +287,40 @@ func main() {
 		jwtSecret = []byte(jwtSecretStr)
 	case "RS256":
 		if *rsaPubKeyPath == "" {
-			panic("[ERROR] Option jwt-sign is RS256 but option rsa-public-key is not provided\n")
+			log.Fatal("[ERROR] Option jwt-sign is RS256 but option rsa-public-key is not provided")
 		}
 		rsaPubKeyBt, err := os.ReadFile(*rsaPubKeyPath)
 		if err != nil {
-			panic("[ERROR] can not read RSA Public Key content. Check your public key\n")
+			log.Fatalf("[ERROR] Cannot read RSA public key file %q: %v", *rsaPubKeyPath, err)
 		}
-		spkiBlock, _ := pem.Decode(rsaPubKeyBt)
-		pubInterface, err := x509.ParseCertificate(spkiBlock.Bytes)
-		if err != nil {
-			panic("[ERROR] x509.ParseCertificate " + err.Error())
+		block, _ := pem.Decode(rsaPubKeyBt)
+		if block == nil {
+			log.Fatal("[ERROR] Failed to decode PEM block from RSA public key file")
 		}
-		rsaPubKey = pubInterface.PublicKey.(*rsa.PublicKey)
+		// Support both a bare PKIX public key (BEGIN PUBLIC KEY) and a full
+		// X.509 certificate (BEGIN CERTIFICATE).
+		switch block.Type {
+		case "PUBLIC KEY":
+			pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+			if err != nil {
+				log.Fatalf("[ERROR] x509.ParsePKIXPublicKey: %v", err)
+			}
+			var ok bool
+			if rsaPubKey, ok = pub.(*rsa.PublicKey); !ok {
+				log.Fatal("[ERROR] RSA public key file does not contain an RSA key")
+			}
+		case "CERTIFICATE":
+			cert, err := x509.ParseCertificate(block.Bytes)
+			if err != nil {
+				log.Fatalf("[ERROR] x509.ParseCertificate: %v", err)
+			}
+			var ok bool
+			if rsaPubKey, ok = cert.PublicKey.(*rsa.PublicKey); !ok {
+				log.Fatal("[ERROR] Certificate does not contain an RSA public key")
+			}
+		default:
+			log.Fatalf("[ERROR] Unsupported PEM block type %q; expected 'PUBLIC KEY' or 'CERTIFICATE'", block.Type)
+		}
 	}
 
 	loginPath = os.Getenv("LOGIN_PATH")
@@ -292,6 +339,7 @@ func main() {
 		secureCookie = true
 	} else {
 		if secureCookie, err = strconv.ParseBool(secureCookieStr); err != nil {
+			log.Printf("[WARN] SECURE_COOKIE value %q is not a valid bool, defaulting to true", secureCookieStr)
 			secureCookie = true
 		}
 	}
@@ -301,14 +349,16 @@ func main() {
 		listenPort = *port
 	}
 
-	authType = os.Getenv("AUTH_TYPE") // jwt-cookie, jwt-query-param
+	authType = os.Getenv("AUTH_TYPE")
 	if authType == "" {
 		authType = "jwt-cookie"
 	}
 
 	fmt.Println("[INFO] authType is " + authType)
 	if authType == "bypass" {
-		fmt.Fprintf(os.Stderr, "[WARN] AUTH_TYPE is bypass - we are not going to check auth\n")
+		fmt.Fprintf(os.Stderr, "\n[WARN] ************************************************************\n")
+		fmt.Fprintf(os.Stderr, "[WARN] AUTH_TYPE=bypass — authentication is DISABLED\n")
+		fmt.Fprintf(os.Stderr, "[WARN] ************************************************************\n\n")
 	}
 
 	queryParamKey = os.Getenv("QUERY_PARAM_KEY")
@@ -319,7 +369,6 @@ func main() {
 	// Path Base when dealing with LB without the re-write feature like Tanzu AVI (yuk)
 	pathBase = os.Getenv("PATH_BASE")
 
-	// Static file server
 	webRoot = os.Getenv("WEB_ROOT")
 	if webRoot == "" {
 		webRoot = *staticDir
@@ -335,7 +384,12 @@ func main() {
 	if sessionLifeTimeStr == "" {
 		sessionLifeTimeStr = "1h"
 	}
-	cookieLastDuration, _ = time.ParseDuration(sessionLifeTimeStr)
+	var durationErr error
+	cookieLastDuration, durationErr = time.ParseDuration(sessionLifeTimeStr)
+	if durationErr != nil {
+		log.Printf("[WARN] SESSION_LIFE_TIME value %q is invalid (%v), defaulting to 1h", sessionLifeTimeStr, durationErr)
+		cookieLastDuration = time.Hour
+	}
 
 	if strings.HasPrefix(webRoot, ".") {
 		stripPrefixPrivate = strings.TrimPrefix(webRoot, ".")
@@ -358,6 +412,7 @@ func main() {
 	privateRoutePath = pathBase + privateRoutePath
 	publicRoutePath = pathBase + publicRoutePath
 	loginPath = pathBase + loginPath
+
 	if cwd, err := os.Getwd(); err == nil {
 		fmt.Fprintf(os.Stderr, "[INFO] Filesystem - Current working directory: '%s'", cwd)
 	}
@@ -368,13 +423,14 @@ func main() {
 
 	// Routes
 	mux.Handle(privateRoutePath, http.StripPrefix(stripPrefixPrivate, authenticate(http.FileServer(http.Dir(webRoot)))))
-	mux.Handle(loginPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		loginPageHandler(w, r)
-	}))
+	mux.Handle(loginPath, http.HandlerFunc(loginPageHandler))
 	if publicRoot != "" {
 		mux.Handle(publicRoutePath, http.StripPrefix(stripPrefixPublic, http.FileServer(http.Dir(publicRoot))))
 	}
 
+	// Wrap the entire mux so misplaced token detection runs for all routes.
+	handler := detectMisplacedToken(mux)
+
 	fmt.Printf("Server is running on port %s\n", listenPort)
-	log.Fatal(http.ListenAndServe(":"+listenPort, mux))
+	log.Fatal(http.ListenAndServe(":"+listenPort, handler))
 }
